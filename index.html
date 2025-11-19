@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D Rocket League - Online Multiplayer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, updateDoc, deleteDoc, serverTimestamp, query, where, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- YOUR FIREBASE CONFIG GOES HERE ---
+        // If you are hosting this on GitHub, paste your firebaseConfig object here.
+        // Example: const customConfig = { apiKey: "...", authDomain: "...", ... };
+        const customConfig = null; 
+
+        // --- ENVIRONMENT SETUP (DO NOT TOUCH) ---
+        // This allows the game to run in the preview environment OR your GitHub
+        let firebaseConfig;
+        if (customConfig) {
+            firebaseConfig = customConfig;
+        } else if (typeof __firebase_config !== 'undefined') {
+            firebaseConfig = JSON.parse(__firebase_config);
+        } else {
+            console.error("No Firebase Config found! Game will not connect.");
+        }
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // Expose to global scope for the game logic
+        window.db = db;
+        window.auth = auth;
+        window.appId = appId;
+        window.collection = collection;
+        window.doc = doc;
+        window.setDoc = setDoc;
+        window.getDoc = getDoc;
+        window.onSnapshot = onSnapshot;
+        window.updateDoc = updateDoc;
+        window.deleteDoc = deleteDoc;
+        window.serverTimestamp = serverTimestamp;
+        window.signInAnonymously = signInAnonymously;
+        window.onAuthStateChanged = onAuthStateChanged;
+
+        // Start Auth immediately
+        signInAnonymously(auth).catch((error) => {
+            console.error("Auth Error:", error);
+            alert("Could not connect to online services.");
+        });
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #111827;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 1rem;
+            overflow-y: auto;
+            color: white;
+        }
+        body.fullscreen-active { padding: 0; overflow: hidden; }
+        
+        #game-container {
+            width: 100%;
+            max-width: 1000px; 
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            border-radius: 1rem;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #1f2937;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+        #game-container.fullscreen-active {
+            width: 100vw; height: 100vh; max-width: none; border-radius: 0; padding: 1rem; box-sizing: border-box;
+        }
+        #game-viewport { position: relative; width: 100%; display: flex; justify-content: center; align-items: center; }
+        #game-container.fullscreen-active #game-viewport { flex-grow: 1; height: 0; min-height: 0; margin: 10px 0; }
+        #canvas-wrapper { position: relative; width: 1000px; height: 600px; }
+        #game-container.fullscreen-active #canvas-wrapper { width: auto; height: auto; max-width: 100%; max-height: 100%; aspect-ratio: 1000 / 600; }
+        canvas { background-color: #2b2f3d; display: block; border-radius: 0.75rem; width: 100%; height: 100%; }
+        
+        /* UI Overlays */
+        #overlay, #lobby-overlay {
+            position: absolute; inset: 0; border-radius: 0.75rem;
+            display: flex; align-items: center; justify-content: center;
+            background-color: rgba(17, 24, 39, 0.95);
+            z-index: 50; opacity: 0; pointer-events: none; transition: opacity 0.3s;
+        }
+        .visible { opacity: 1 !important; pointer-events: auto !important; }
+        
+        /* Styling for interactive elements */
+        .menu-btn {
+            padding: 0.75rem 1.5rem; background-color: #4b5563; border-radius: 0.5rem;
+            cursor: pointer; transition: all 0.2s; font-weight: bold; text-align: center;
+        }
+        .menu-btn:hover { background-color: #6b7280; transform: translateY(-2px); }
+        .menu-btn.primary { background-color: #2563eb; }
+        .menu-btn.primary:hover { background-color: #3b82f6; }
+        .menu-btn.danger { background-color: #dc2626; }
+        .menu-btn.danger:hover { background-color: #ef4444; }
+        
+        .room-item {
+            background: #374151; padding: 10px; margin-bottom: 8px; border-radius: 6px;
+            display: flex; justify-content: space-between; align-items: center;
+        }
+        
+        /* Loading Spinner */
+        .loader { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+<div id="game-container" class="p-4 sm:p-6 lg:p-8">
+    <div id="top-bar" class="w-full mb-2 flex justify-between shrink-0 max-w-[1000px]">
+        <div class="text-gray-400 text-sm flex items-center">
+            <span id="connection-status" class="mr-2">🔴 Connecting...</span>
+            <span id="user-id-display" class="font-mono text-xs"></span>
+        </div>
+        <button id="fullscreen-btn" class="px-3 py-1 bg-gray-600 hover:bg-gray-500 text-white text-sm font-bold rounded shadow transition">
+            📺 Fullscreen
+        </button>
+    </div>
+
+    <div id="game-viewport">
+        <div id="canvas-wrapper">
+            <canvas id="gameCanvas"></canvas>
+            
+            <!-- Main Menu / Game Over Overlay -->
+            <div id="overlay" class="visible">
+                <div id="menu-content" class="text-center p-8 w-full max-w-md">
+                    <h1 class="text-5xl font-extrabold mb-8 text-yellow-400">ONLINE LEAGUE</h1>
+                    <div class="space-y-4">
+                        <div id="btn-create-room" class="menu-btn primary">Create Private Room</div>
+                        <div id="btn-join-room" class="menu-btn">Join Room by ID</div>
+                        <div onclick="window.location.href='https://ccpspy.github.io/cargame'" class="menu-btn bg-gray-700 mt-8 text-sm">Back to Local Game</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Lobby Overlay -->
+            <div id="lobby-overlay">
+                <div class="bg-gray-800 p-6 rounded-xl shadow-2xl w-full max-w-2xl flex flex-col gap-4">
+                    <div class="flex justify-between items-center border-b border-gray-600 pb-4">
+                        <h2 class="text-2xl font-bold text-blue-400">Room Lobby</h2>
+                        <div class="text-right">
+                            <p class="text-xs text-gray-400">Room ID:</p>
+                            <p id="lobby-room-id" class="font-mono text-xl bg-gray-900 px-3 py-1 rounded select-all cursor-pointer" title="Click to Copy">LOADING</p>
+                        </div>
+                    </div>
+                    
+                    <div class="flex gap-4">
+                        <!-- Team Blue -->
+                        <div class="flex-1 bg-blue-900/30 p-4 rounded-lg border border-blue-800">
+                            <h3 class="font-bold text-blue-400 mb-2 text-center">BLUE TEAM</h3>
+                            <div id="lobby-list-blue" class="space-y-2 min-h-[100px]"></div>
+                            <button id="btn-join-blue" class="w-full mt-2 py-1 text-xs bg-blue-700 hover:bg-blue-600 rounded">Join Blue</button>
+                        </div>
+                        
+                        <!-- Team Red -->
+                        <div class="flex-1 bg-red-900/30 p-4 rounded-lg border border-red-800">
+                            <h3 class="font-bold text-red-400 mb-2 text-center">RED TEAM</h3>
+                            <div id="lobby-list-red" class="space-y-2 min-h-[100px]"></div>
+                            <button id="btn-join-red" class="w-full mt-2 py-1 text-xs bg-red-700 hover:bg-red-600 rounded">Join Red</button>
+                        </div>
+                    </div>
+
+                    <div class="border-t border-gray-600 pt-4 flex justify-between items-center">
+                        <div class="text-sm text-gray-400">
+                            <p>Mode: <span id="lobby-mode-display" class="text-white font-bold">1v1</span></p>
+                            <p class="text-xs mt-1 text-yellow-500">* Host controls bots & ball physics.</p>
+                        </div>
+                        <div class="flex gap-2">
+                            <button id="btn-leave-lobby" class="menu-btn danger py-2 text-sm">Leave</button>
+                            <button id="btn-start-game" class="menu-btn primary py-2 text-sm hidden">START GAME</button>
+                            <div id="lobby-waiting-msg" class="py-2 px-4 text-gray-400 italic animate-pulse">Waiting for Host...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Room Creator Overlay -->
+             <div id="creator-overlay" class="absolute inset-0 bg-gray-900/95 z-[60] hidden flex items-center justify-center">
+                <div class="bg-gray-800 p-6 rounded-xl w-96">
+                    <h3 class="text-xl font-bold mb-4">Create Room</h3>
+                    <label class="block text-sm mb-2 text-gray-400">Game Mode</label>
+                    <div class="grid grid-cols-3 gap-2 mb-6">
+                        <button class="mode-select-btn bg-blue-600 text-white py-2 rounded border-2 border-transparent" data-mode="1v1">1v1</button>
+                        <button class="mode-select-btn bg-gray-700 text-gray-300 py-2 rounded border-2 border-transparent" data-mode="2v2">2v2</button>
+                        <button class="mode-select-btn bg-gray-700 text-gray-300 py-2 rounded border-2 border-transparent" data-mode="3v3">3v3</button>
+                    </div>
+                    <div class="flex justify-end gap-2">
+                        <button id="btn-cancel-create" class="px-4 py-2 rounded text-gray-300 hover:bg-gray-700">Cancel</button>
+                        <button id="btn-confirm-create" class="px-4 py-2 rounded bg-green-600 text-white hover:bg-green-500">Create</button>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+    
+    <!-- In-Game UI -->
+    <div id="ui-panel" class="mt-2 p-4 bg-gray-700 rounded-lg shadow-lg hidden w-full max-w-[1000px]">
+        <div class="flex justify-between items-center text-xl font-bold">
+            <div class="text-blue-400 w-1/3">BLUE: <span id="score-left">0</span></div>
+            <div class="text-center w-1/3">
+                <div id="timer" class="text-white text-3xl font-mono">00:00</div>
+            </div>
+            <div class="text-red-400 w-1/3 text-right">RED: <span id="score-right">0</span></div>
+        </div>
+    </div>
+</div>
+
+<script>
+// --- GLOBAL VARS & CONSTANTS ---
+const DEFAULT_WIDTH = 1000, DEFAULT_HEIGHT = 600;
+const CAR_WIDTH = 50, CAR_HEIGHT = 25;
+const BALL_RADIUS = 17;
+const GOAL_HEIGHT = 170;
+const PHYSICS_TICK_RATE = 60;
+const SYNC_RATE = 100; // ms between network writes
+
+// Colors
+const COLOR_BLUE = '#0066cc';
+const COLOR_RED = '#cc0000';
+const COLOR_CYAN = '#00fff4';
+
+let currentUser = null;
+let currentRoomId = null;
+let isHost = false;
+let unsubscribeRoom = null;
+let lastSyncTime = 0;
+
+// Game State
+const gameState = {
+    active: false,
+    mode: '1v1',
+    players: {}, // Map of player data
+    cars: [],
+    ball: null,
+    score: { blue: 0, red: 0 },
+    timeRemaining: 300,
+    over: false
+};
+
+let localKeys = {};
+let canvas, ctx;
+let animationFrameId;
+
+// --- GAME CLASSES (Copied & Adapted) ---
+
+class Car {
+    constructor(id, x, y, team, isBot = false) {
+        this.id = id;
+        this.x = x; this.y = y; this.angle = team === 'blue' ? 0 : 180;
+        this.team = team;
+        this.color = team === 'blue' ? COLOR_BLUE : COLOR_RED;
+        this.velX = 0; this.velY = 0;
+        this.isBot = isBot;
+        
+        // Physics constants
+        this.acceleration = 0.3;
+        this.rotationSpeed = 4.5;
+        this.maxSpeed = 5.0;
+        this.friction = 0.96;
+        this.boost = 100;
+        this.boosting = false;
+
+        // For interpolation
+        this.targetX = x;
+        this.targetY = y;
+        this.targetAngle = this.angle;
+    }
+
+    updatePhysics(input) {
+        // Rotation
+        if (input.left) this.angle = (this.angle + this.rotationSpeed) % 360;
+        if (input.right) this.angle = (this.angle - this.rotationSpeed) % 360;
+
+        // Thrust
+        let thrust = 0;
+        if (input.up) thrust = 1;
+        if (input.down) thrust = -0.7;
+
+        // Boost
+        this.boosting = input.boost && this.boost > 0;
+        if (this.boosting) {
+            thrust *= 1.8; // Boost power
+            this.boost -= 1.2; // Usage
+        } else if (this.boost < 100) {
+            this.boost += 0.1; // Regen
+        }
+
+        if (thrust !== 0) {
+            let rad = Math.PI * this.angle / 180;
+            this.velX += Math.cos(rad) * this.acceleration * thrust;
+            this.velY -= Math.sin(rad) * this.acceleration * thrust;
+        }
+
+        // Friction
+        this.velX *= this.friction;
+        this.velY *= this.friction;
+
+        // Cap speed
+        let speed = Math.hypot(this.velX, this.velY);
+        let maxS = this.boosting ? this.maxSpeed * 1.8 : this.maxSpeed;
+        if (speed > maxS) {
+            let ratio = maxS / speed;
+            this.velX *= ratio;
+            this.velY *= ratio;
+        }
+
+        // Move
+        this.x += this.velX;
+        this.y += this.velY;
+
+        // Bounds
+        const margin = 25;
+        if (this.x < margin) { this.x = margin; this.velX *= -0.5; }
+        if (this.x > DEFAULT_WIDTH - margin) { this.x = DEFAULT_WIDTH - margin; this.velX *= -0.5; }
+        if (this.y < margin) { this.y = margin; this.velY *= -0.5; }
+        if (this.y > DEFAULT_HEIGHT - margin) { this.y = DEFAULT_HEIGHT - margin; this.velY *= -0.5; }
+    }
+
+    lerp(factor) {
+        this.x += (this.targetX - this.x) * factor;
+        this.y += (this.targetY - this.y) * factor;
+        
+        // Angle lerp is tricky
+        let diff = this.targetAngle - this.angle;
+        while (diff < -180) diff += 360;
+        while (diff > 180) diff -= 360;
+        this.angle += diff * factor;
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(-Math.PI * this.angle / 180);
+        
+        // Body
+        ctx.fillStyle = this.color;
+        ctx.beginPath(); ctx.roundRect(-25, -12.5, 50, 25, 4); ctx.fill();
+        
+        // Window
+        ctx.fillStyle = 'yellow';
+        ctx.beginPath(); ctx.roundRect(15, -10, 8, 20, 2); ctx.fill();
+
+        // Boost flame
+        if (this.boosting) {
+            ctx.fillStyle = "#ffaa00";
+            ctx.beginPath();
+            ctx.moveTo(-25, 0); ctx.lineTo(-40, -8); ctx.lineTo(-50, 0); ctx.lineTo(-40, 8);
+            ctx.fill();
+        }
+        
+        ctx.restore();
+
+        // Name Tag
+        ctx.fillStyle = "white";
+        ctx.font = "10px Inter";
+        ctx.textAlign = "center";
+        ctx.fillText(this.id.substring(0, 6), this.x, this.y - 20);
+    }
+}
+
+class Ball {
+    constructor() {
+        this.x = DEFAULT_WIDTH / 2;
+        this.y = DEFAULT_HEIGHT / 2;
+        this.velX = 0; this.velY = 0;
+        this.radius = BALL_RADIUS;
+        this.pointType = 1; // 1, 2, or 3
+        this.reset();
+    }
+
+    reset() {
+        this.x = DEFAULT_WIDTH / 2;
+        this.y = DEFAULT_HEIGHT / 2;
+        this.velX = 0; this.velY = 0;
+        
+        // Randomize special balls like original
+        let r = Math.random();
+        if (r < 0.05) this.pointType = 3;
+        else if (r < 0.15) this.pointType = 2;
+        else this.pointType = 1;
+    }
+
+    update() {
+        this.x += this.velX;
+        this.y += this.velY;
+        this.velX *= 0.99; // Drag
+        this.velY *= 0.99;
+
+        // Walls
+        if (this.x < this.radius) { this.x = this.radius; this.velX *= -0.8; }
+        if (this.x > DEFAULT_WIDTH - this.radius) { this.x = DEFAULT_WIDTH - this.radius; this.velX *= -0.8; }
+        if (this.y < this.radius) { this.y = this.radius; this.velY *= -0.8; }
+        if (this.y > DEFAULT_HEIGHT - this.radius) { this.y = DEFAULT_HEIGHT - this.radius; this.velY *= -0.8; }
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = this.pointType === 1 ? COLOR_CYAN : (this.pointType === 2 ? '#ffe066' : '#ff92c6');
+        ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fill();
+        
+        if (this.pointType > 1) {
+            ctx.fillStyle = "black";
+            ctx.font = "bold 12px Inter";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(this.pointType + "x", this.x, this.y);
+        }
+    }
+}
+
+// --- NETWORK & LOGIC ---
+
+function initGame() {
+    canvas = document.getElementById('gameCanvas');
+    ctx = canvas.getContext('2d');
+    canvas.width = DEFAULT_WIDTH;
+    canvas.height = DEFAULT_HEIGHT;
+
+    // Initialize Auth Listener
+    window.onAuthStateChanged(window.auth, (user) => {
+        if (user) {
+            currentUser = user;
+            document.getElementById('connection-status').textContent = "🟢 Online";
+            document.getElementById('connection-status').classList.add('text-green-400');
+            document.getElementById('user-id-display').textContent = "ID: " + user.uid.substring(0, 6);
+        } else {
+            document.getElementById('connection-status').textContent = "🔴 Disconnected";
+        }
+    });
+
+    // Button Listeners
+    document.getElementById('btn-create-room').onclick = () => {
+        document.getElementById('creator-overlay').classList.remove('hidden');
+    };
+    document.getElementById('btn-cancel-create').onclick = () => {
+        document.getElementById('creator-overlay').classList.add('hidden');
+    };
+    document.getElementById('btn-join-room').onclick = () => {
+        const rid = prompt("Enter Room ID:");
+        if (rid) joinRoom(rid);
+    };
+    
+    document.querySelectorAll('.mode-select-btn').forEach(btn => {
+        btn.onclick = (e) => {
+            document.querySelectorAll('.mode-select-btn').forEach(b => {
+                b.classList.remove('bg-blue-600', 'text-white');
+                b.classList.add('bg-gray-700', 'text-gray-300');
+            });
+            e.target.classList.remove('bg-gray-700', 'text-gray-300');
+            e.target.classList.add('bg-blue-600', 'text-white');
+        };
+    });
+    
+    document.getElementById('btn-confirm-create').onclick = () => {
+        const selectedModeBtn = document.querySelector('.mode-select-btn.bg-blue-600');
+        createRoom(selectedModeBtn.dataset.mode);
+    };
+
+    document.getElementById('btn-leave-lobby').onclick = leaveRoom;
+    document.getElementById('btn-join-blue').onclick = () => switchTeam('blue');
+    document.getElementById('btn-join-red').onclick = () => switchTeam('red');
+    document.getElementById('btn-start-game').onclick = startGameRequest;
+
+    // Keyboard
+    window.addEventListener('keydown', e => {
+        if(e.code === 'ArrowUp' || e.code === 'KeyW') localKeys.up = true;
+        if(e.code === 'ArrowDown' || e.code === 'KeyS') localKeys.down = true;
+        if(e.code === 'ArrowLeft' || e.code === 'KeyA') localKeys.left = true;
+        if(e.code === 'ArrowRight' || e.code === 'KeyD') localKeys.right = true;
+        if(e.code === 'Space' || e.code === 'ShiftLeft') localKeys.boost = true;
+    });
+    window.addEventListener('keyup', e => {
+        if(e.code === 'ArrowUp' || e.code === 'KeyW') localKeys.up = false;
+        if(e.code === 'ArrowDown' || e.code === 'KeyS') localKeys.down = false;
+        if(e.code === 'ArrowLeft' || e.code === 'KeyA') localKeys.left = false;
+        if(e.code === 'ArrowRight' || e.code === 'KeyD') localKeys.right = false;
+        if(e.code === 'Space' || e.code === 'ShiftLeft') localKeys.boost = false;
+    });
+
+    // Start loop
+    requestAnimationFrame(gameLoop);
+}
+
+// --- ROOM MANAGEMENT ---
+
+async function createRoom(mode) {
+    if (!currentUser) return;
+    
+    const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const roomRef = window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'rooms', roomId);
+    
+    const roomData = {
+        hostId: currentUser.uid,
+        status: 'lobby',
+        mode: mode,
+        createdAt: window.serverTimestamp(),
+        players: {
+            [currentUser.uid]: {
+                name: "Host",
+                team: 'blue',
+                ready: true
+            }
+        },
+        gameData: {
+            scoreBlue: 0,
+            scoreRed: 0,
+            timeLeft: 300,
+            ball: { x: 500, y: 300, vx: 0, vy: 0, type: 1 },
+            bots: []
+        }
+    };
+
+    try {
+        await window.setDoc(roomRef, roomData);
+        joinRoom(roomId);
+        document.getElementById('creator-overlay').classList.add('hidden');
+    } catch (e) {
+        console.error("Firebase Write Error:", e);
+        if (e.code === 'permission-denied') {
+            alert("Permission Denied: If you are on the GitHub website, check your Firestore Security Rules.\n\nSet them to Test Mode (allow read, write: if true) in the Firebase Console to fix this.\n\n(This error is expected in the Preview window due to shared database restrictions).");
+        } else {
+            alert("Error creating room: " + e.message);
+        }
+    }
+}
+
+function joinRoom(roomId) {
+    if (unsubscribeRoom) unsubscribeRoom();
+    currentRoomId = roomId;
+
+    const roomRef = window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'rooms', roomId);
+
+    unsubscribeRoom = window.onSnapshot(roomRef, (docSnap) => {
+        if (!docSnap.exists()) {
+            alert("Room deleted or doesn't exist.");
+            leaveRoom();
+            return;
+        }
+        const data = docSnap.data();
+        renderLobby(data);
+        syncGameState(data);
+    });
+
+    document.getElementById('overlay').classList.remove('visible');
+    document.getElementById('lobby-overlay').classList.add('visible');
+}
+
+async function leaveRoom() {
+    if (!currentRoomId) return;
+    
+    // If host, delete room? Or just leave? For now, just leave locally.
+    if (unsubscribeRoom) unsubscribeRoom();
+    
+    // Remove self from db
+    if (currentRoomId && currentUser) {
+        const roomRef = window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'rooms', currentRoomId);
+        // Complex update to remove key from map, simplified here by just reloading logic or basic state reset
+        // Ideally: updateDoc(roomRef, { [`players.${currentUser.uid}`]: deleteField() });
+    }
+
+    currentRoomId = null;
+    gameState.active = false;
+    document.getElementById('lobby-overlay').classList.remove('visible');
+    document.getElementById('overlay').classList.add('visible');
+    document.getElementById('ui-panel').classList.add('hidden');
+}
+
+async function switchTeam(team) {
+    if (!currentRoomId) return;
+    const roomRef = window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'rooms', currentRoomId);
+    // We need to read first to preserve other fields, or use dot notation update
+    // Firestore dot notation for map fields: "players.uid.team"
+    let updateData = {};
+    updateData[`players.${currentUser.uid}.team`] = team;
+    updateData[`players.${currentUser.uid}.name`] = isHost ? "Host" : "Player"; 
+    
+    await window.updateDoc(roomRef, updateData);
+}
+
+async function startGameRequest() {
+    if (!isHost || !currentRoomId) return;
+    const roomRef = window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'rooms', currentRoomId);
+    
+    // Fill bots
+    let players = gameState.players; // Current local snapshot
+    let blueCount = Object.values(players).filter(p => p.team === 'blue').length;
+    let redCount = Object.values(players).filter(p => p.team === 'red').length;
+    let targetPerTeam = gameState.mode === '1v1' ? 1 : (gameState.mode === '2v2' ? 2 : 3);
+    
+    let bots = [];
+    for(let i=blueCount; i<targetPerTeam; i++) bots.push({ id: `BOT_B_${i}`, team: 'blue' });
+    for(let i=redCount; i<targetPerTeam; i++) bots.push({ id: `BOT_R_${i}`, team: 'red' });
+
+    await window.updateDoc(roomRef, {
+        status: 'playing',
+        'gameData.bots': bots
+    });
+}
+
+// --- RENDER & SYNC ---
+
+function renderLobby(data) {
+    isHost = (data.hostId === currentUser.uid);
+    gameState.mode = data.mode;
+    gameState.players = data.players || {};
+    
+    document.getElementById('lobby-room-id').textContent = currentRoomId;
+    document.getElementById('lobby-room-id').onclick = () => {
+        navigator.clipboard.writeText(currentRoomId);
+        alert("Room ID copied!");
+    };
+    
+    document.getElementById('lobby-mode-display').textContent = data.mode;
+
+    const blueList = document.getElementById('lobby-list-blue');
+    const redList = document.getElementById('lobby-list-red');
+    blueList.innerHTML = ''; redList.innerHTML = '';
+
+    Object.entries(data.players).forEach(([uid, p]) => {
+        const div = document.createElement('div');
+        div.className = 'bg-gray-700 p-2 rounded text-sm flex justify-between';
+        div.innerHTML = `<span>${p.name} ${uid === currentUser.uid ? '(You)' : ''}</span>`;
+        
+        if (p.team === 'blue') blueList.appendChild(div);
+        else redList.appendChild(div);
+    });
+
+    if (data.status === 'playing') {
+        document.getElementById('lobby-overlay').classList.remove('visible');
+        document.getElementById('ui-panel').classList.remove('hidden');
+        if (!gameState.active) initMatch(data);
+    } else {
+        document.getElementById('lobby-overlay').classList.add('visible');
+        document.getElementById('ui-panel').classList.add('hidden');
+        
+        const startBtn = document.getElementById('btn-start-game');
+        const waitMsg = document.getElementById('lobby-waiting-msg');
+        
+        if (isHost) {
+            startBtn.classList.remove('hidden');
+            waitMsg.classList.add('hidden');
+        } else {
+            startBtn.classList.add('hidden');
+            waitMsg.classList.remove('hidden');
+        }
+    }
+}
+
+function initMatch(data) {
+    gameState.active = true;
+    gameState.score = { blue: 0, red: 0 };
+    
+    // Create Car instances
+    gameState.cars = [];
+    
+    // Add Players
+    Object.entries(data.players).forEach(([uid, p]) => {
+        let startX = p.team === 'blue' ? 150 : 850;
+        let startY = 300; // Stack them later if needed
+        gameState.cars.push(new Car(uid, startX, startY, p.team));
+    });
+
+    // Add Bots
+    if (data.gameData.bots) {
+        data.gameData.bots.forEach(bot => {
+            let startX = bot.team === 'blue' ? 150 : 850;
+            gameState.cars.push(new Car(bot.id, startX, 300, bot.team, true));
+        });
+    }
+
+    // Create Ball
+    gameState.ball = new Ball();
+}
+
+function syncGameState(data) {
+    // Update Score & Time
+    gameState.score.blue = data.gameData.scoreBlue;
+    gameState.score.red = data.gameData.scoreRed;
+    document.getElementById('score-left').textContent = gameState.score.blue;
+    document.getElementById('score-right').textContent = gameState.score.red;
+    
+    // Interpolate Ball
+    if (gameState.ball && data.gameData.ball) {
+        let serverBall = data.gameData.ball;
+        // Simple lerp for ball to prevent teleporting too hard
+        gameState.ball.x = gameState.ball.x * 0.7 + serverBall.x * 0.3;
+        gameState.ball.y = gameState.ball.y * 0.7 + serverBall.y * 0.3;
+        gameState.ball.pointType = serverBall.type;
+    }
+
+    // Sync Remote Players
+    // We trust the server/host for OTHER players position
+    if (data.gameData.carPositions) {
+        Object.entries(data.gameData.carPositions).forEach(([id, pos]) => {
+            let car = gameState.cars.find(c => c.id === id);
+            if (car) {
+                if (id === currentUser.uid) {
+                    // Reconciliation: If server says we are WAY off, snap back. 
+                    // Otherwise, trust local physics for responsiveness.
+                    let dist = Math.hypot(car.x - pos.x, car.y - pos.y);
+                    if (dist > 100) {
+                        car.x = pos.x; car.y = pos.y;
+                    }
+                } else {
+                    // It's someone else, smooth update
+                    car.targetX = pos.x;
+                    car.targetY = pos.y;
+                    car.targetAngle = pos.angle;
+                }
+            }
+        });
+    }
+}
+
+
+// --- MAIN GAME LOOP ---
+
+function gameLoop() {
+    if (gameState.active) {
+        
+        // 1. Local Physics for My Car (Prediction)
+        let myCar = gameState.cars.find(c => c.id === currentUser.uid);
+        if (myCar) {
+            myCar.updatePhysics(localKeys);
+        }
+
+        // 2. Interpolate Others
+        gameState.cars.forEach(c => {
+            if (c.id !== currentUser.uid && !isHost) { // If I am not host, I lerp bots too
+                c.lerp(0.1);
+            }
+        });
+
+        // 3. HOST LOGIC (Authoritative)
+        if (isHost) {
+            // Host runs physics for Bots
+            gameState.cars.filter(c => c.isBot).forEach(bot => {
+                // Simple AI: drive to ball
+                let dx = gameState.ball.x - bot.x;
+                let dy = gameState.ball.y - bot.y;
+                let targetAngle = (Math.atan2(-dy, dx) * 180 / Math.PI + 360) % 360;
+                let angleDiff = targetAngle - bot.angle;
+                if (angleDiff > 180) angleDiff -= 360;
+                if (angleDiff < -180) angleDiff += 360;
+
+                let input = { up: true, left: angleDiff > 10, right: angleDiff < -10, boost: Math.random() < 0.05 };
+                bot.updatePhysics(input);
+            });
+            
+            // Host runs Ball Physics
+            gameState.ball.update();
+            
+            // Host checks Collisions
+            gameState.cars.forEach(car => {
+                let dx = gameState.ball.x - car.x;
+                let dy = gameState.ball.y - car.y;
+                let dist = Math.hypot(dx, dy);
+                if (dist < gameState.ball.radius + 25) { // Collision
+                     let angle = Math.atan2(dy, dx);
+                     let force = 15; // Hit power
+                     if (car.boosting) force = 25;
+                     gameState.ball.velX += Math.cos(angle) * force;
+                     gameState.ball.velY += Math.sin(angle) * force;
+                }
+            });
+
+            // Goals
+            if (gameState.ball.x < 10) { 
+                // Red Goal (Blue Scores?) No, left is Blue Goal usually.
+                // Standard RL: Left side is Blue Team, Right side is Red Team.
+                // If ball goes Left (< 0), Red Scores.
+                handleGoal('red');
+            } else if (gameState.ball.x > DEFAULT_WIDTH - 10) {
+                handleGoal('blue');
+            }
+        } else {
+            // Client just predicts ball locally a tiny bit for smoothness
+             gameState.ball.x += gameState.ball.velX * 0.1;
+             gameState.ball.y += gameState.ball.velY * 0.1;
+        }
+
+        // 4. Draw Everything
+        drawGame();
+
+        // 5. Network Update (Throttled)
+        let now = Date.now();
+        if (now - lastSyncTime > SYNC_RATE) {
+            pushNetworkUpdate();
+            lastSyncTime = now;
+        }
+    }
+
+    animationFrameId = requestAnimationFrame(gameLoop);
+}
+
+async function handleGoal(scoringTeam) {
+    if (!isHost) return;
+    
+    // Update score
+    let points = gameState.ball.pointType;
+    if (scoringTeam === 'blue') gameState.score.blue += points;
+    else gameState.score.red += points;
+
+    // Reset Ball
+    gameState.ball.reset();
+    
+    // Reset Cars (optional, but good for fairness)
+    gameState.cars.forEach(c => {
+        c.x = c.team === 'blue' ? 150 : 850;
+        c.y = 300;
+        c.velX = 0; c.velY = 0;
+    });
+
+    // Force sync immediately
+    pushNetworkUpdate(true);
+}
+
+async function pushNetworkUpdate(force = false) {
+    if (!currentRoomId || !gameState.active) return;
+
+    const roomRef = window.doc(window.db, 'artifacts', window.appId, 'public', 'data', 'rooms', currentRoomId);
+
+    if (isHost) {
+        // Host writes EVERYTHING: Ball, Bots, Score, and their own car
+        let positions = {};
+        gameState.cars.forEach(c => {
+            positions[c.id] = { x: Math.round(c.x), y: Math.round(c.y), angle: Math.round(c.angle) };
+        });
+
+        await window.updateDoc(roomRef, {
+            'gameData.ball': { x: Math.round(gameState.ball.x), y: Math.round(gameState.ball.y), vx: gameState.ball.velX, vy: gameState.ball.velY, type: gameState.ball.pointType },
+            'gameData.carPositions': positions,
+            'gameData.scoreBlue': gameState.score.blue,
+            'gameData.scoreRed': gameState.score.red
+        });
+    } else {
+        // Client only writes their OWN position
+        let myCar = gameState.cars.find(c => c.id === currentUser.uid);
+        if (myCar) {
+            // Note: In a real Firestore app, updating a nested field inside a map inside a document 
+            // requires a specific dot notation update or merging.
+            // We are using a simplified approach here. 
+            // To avoid overwriting other players, we use dot notation dynamic key.
+            let updatePayload = {};
+            updatePayload[`gameData.carPositions.${currentUser.uid}`] = { 
+                x: Math.round(myCar.x), 
+                y: Math.round(myCar.y), 
+                angle: Math.round(myCar.angle) 
+            };
+            
+            // Fire and forget (don't await to prevent frame drops)
+            window.updateDoc(roomRef, updatePayload).catch(err => console.warn("Sync lag", err));
+        }
+    }
+}
+
+// --- DRAWING ---
+
+function drawGame() {
+    // Clear
+    ctx.fillStyle = '#2b2f3d';
+    ctx.fillRect(0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT);
+
+    // Field Lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(DEFAULT_WIDTH/2, 0); ctx.lineTo(DEFAULT_WIDTH/2, DEFAULT_HEIGHT); ctx.stroke();
+    ctx.beginPath(); ctx.arc(DEFAULT_WIDTH/2, DEFAULT_HEIGHT/2, 80, 0, Math.PI*2); ctx.stroke();
+
+    // Goals
+    ctx.fillStyle = 'rgba(0, 102, 204, 0.3)'; 
+    ctx.fillRect(0, DEFAULT_HEIGHT/2 - GOAL_HEIGHT/2, 20, GOAL_HEIGHT);
+    ctx.fillStyle = 'rgba(204, 0, 0, 0.3)'; 
+    ctx.fillRect(DEFAULT_WIDTH - 20, DEFAULT_HEIGHT/2 - GOAL_HEIGHT/2, 20, GOAL_HEIGHT);
+
+    // Objects
+    if (gameState.ball) gameState.ball.draw(ctx);
+    gameState.cars.forEach(c => c.draw(ctx));
+}
+
+// Fullscreen logic
+const fsBtn = document.getElementById('fullscreen-btn');
+fsBtn.addEventListener('click', () => {
+    const elem = document.getElementById('game-container');
+    if (!document.fullscreenElement) {
+        elem.requestFullscreen().catch(err => console.log(err));
+        elem.classList.add('fullscreen-active');
+        document.body.classList.add('fullscreen-active');
+        fsBtn.textContent = "Exit Fullscreen";
+    } else {
+        document.exitFullscreen();
+        elem.classList.remove('fullscreen-active');
+        document.body.classList.remove('fullscreen-active');
+        fsBtn.textContent = "📺 Fullscreen";
+    }
+});
+
+window.onload = initGame;
+
+</script>
+</body>
+</html>
