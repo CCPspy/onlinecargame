@@ -36,7 +36,8 @@
         window.netState = {
             db, auth, user: null, currentRoomId: null, isHost: false,
             unsubRoom: null, unsubPlayers: null, unsubEntities: null, unsubGameState: null,
-            lastUpdateSent: 0, playerMap: {}, connectedPlayersList: []
+            lastUpdateSent: 0, playerMap: {}, connectedPlayersList: [],
+            cachedPlayers: [] // Cache for re-rendering
         };
 
         const statusEl = document.getElementById('connection-status');
@@ -152,6 +153,7 @@
             window.netState.isHost = false;
             window.netState.playerMap = {};
             window.netState.connectedPlayersList = [];
+            window.netState.cachedPlayers = [];
             document.getElementById('app').classList.remove('in-game');
             window.switchScreen('screen-start');
             window.resetGameObjects();
@@ -174,10 +176,8 @@
             try { await updateDoc(doc(colRooms, window.netState.currentRoomId), { status: 'playing' }); } catch(e){}
         };
 
-        // --- OPTIMIZED SEND UPDATE ---
         window.sendGameUpdate = async (myEntities, ballData, gameData) => {
             const now = Date.now();
-            // --- FIX: Increased throttle to 100ms (10fps) to prevent Quota Exceeded errors ---
             if (now - window.netState.lastUpdateSent < 100) return; 
             window.netState.lastUpdateSent = now;
             
@@ -189,7 +189,6 @@
             const entId = `${roomId}_${uid}`;
             
             if (myEntities) {
-                // Removed serverTimestamp to reduce write complexity/overhead
                 batch.set(doc(colEntities, entId), { roomId, userId: uid, data: myEntities });
             }
             
@@ -205,29 +204,45 @@
                 }
                 batch.set(doc(colGameStates, roomId), update, { merge: true });
             }
-            try { await batch.commit(); } catch(e) { /* Silently handle network drops */ }
+            try { await batch.commit(); } catch(e) { }
         };
 
         function subscribeToRoom(roomId) {
             window.netState.currentRoomId = roomId;
+            
+            // --- ROOM LISTENER ---
             window.netState.unsubRoom = onSnapshot(doc(colRooms, roomId), (snap) => {
                 if(!snap.exists()) { 
                     setTimeout(() => { if (window.netState.currentRoomId) window.leaveRoom(); }, 100);
                     return; 
                 }
                 const data = snap.data();
+                // Update settings locally
                 window.updateLobbyUI(data);
+                
+                // --- FIX: Re-render slots when room settings (like mode) load ---
+                // This ensures the correct number of slots appear even if player data arrived first
+                if (window.netState.cachedPlayers) {
+                    window.renderSlots(window.netState.cachedPlayers);
+                }
+
                 if (data.status === 'playing' && window.gameState !== 'playing') window.initGame(data);
             }, (err) => console.log(err));
 
+            // --- PLAYER LISTENER ---
             const qPlayers = query(colPlayers, where('roomId', '==', roomId));
             window.netState.unsubPlayers = onSnapshot(qPlayers, (snap) => {
                 const list = [];
                 snap.forEach(d => list.push({...d.data(), id: d.data().userId}));
                 window.netState.playerMap = list.reduce((acc,p) => ({...acc, [p.id]:p}), {});
                 window.netState.connectedPlayersList = list.map(p => p.id).sort();
+                
+                // Cache for re-renders
+                window.netState.cachedPlayers = list;
+
                 const me = list.find(p => p.id === window.netState.user.uid);
                 if(me) window.netState.isHost = me.isHost;
+                
                 window.renderSlots(list);
             }, (err) => console.log(err));
 
