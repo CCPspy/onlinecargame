@@ -174,9 +174,11 @@
             try { await updateDoc(doc(colRooms, window.netState.currentRoomId), { status: 'playing' }); } catch(e){}
         };
 
+        // --- OPTIMIZED SEND UPDATE ---
         window.sendGameUpdate = async (myEntities, ballData, gameData) => {
             const now = Date.now();
-            if (now - window.netState.lastUpdateSent < 50) return; // 20fps cap
+            // --- FIX: Increased throttle to 100ms (10fps) to prevent Quota Exceeded errors ---
+            if (now - window.netState.lastUpdateSent < 100) return; 
             window.netState.lastUpdateSent = now;
             
             const roomId = window.netState.currentRoomId;
@@ -187,7 +189,8 @@
             const entId = `${roomId}_${uid}`;
             
             if (myEntities) {
-                batch.set(doc(colEntities, entId), { roomId, userId: uid, data: myEntities, ts: serverTimestamp() });
+                // Removed serverTimestamp to reduce write complexity/overhead
+                batch.set(doc(colEntities, entId), { roomId, userId: uid, data: myEntities });
             }
             
             if (ballData || gameData) {
@@ -202,7 +205,7 @@
                 }
                 batch.set(doc(colGameStates, roomId), update, { merge: true });
             }
-            try { await batch.commit(); } catch(e) {}
+            try { await batch.commit(); } catch(e) { /* Silently handle network drops */ }
         };
 
         function subscribeToRoom(roomId) {
@@ -781,11 +784,11 @@ class Car {
                 this.y += this.velY * dt * 60; 
 
                 // 3. Gently correct position error (Lerp)
-                // Instead of just snapping, we pull the car towards the authoritative position
+                // Increased correction factor from 0.15 to 0.2 for slightly snappier sync
                 const targetX = data.x;
                 const targetY = data.y;
-                this.x += (targetX - this.x) * 0.15; 
-                this.y += (targetY - this.y) * 0.15; 
+                this.x += (targetX - this.x) * 0.2; 
+                this.y += (targetY - this.y) * 0.2; 
 
                 // 4. Angle Interpolation
                 let d = data.angle - this.angle;
@@ -1141,7 +1144,7 @@ async function loop() {
                 // --- ADDED: Velocity (vx, vy) for smoother prediction on clients ---
                 myUpdateData[c.id] = { 
                     x: Math.round(c.x), y: Math.round(c.y), 
-                    vx: parseFloat(c.velX.toFixed(2)), vy: parseFloat(c.velY.toFixed(2)),
+                    vx: parseFloat(c.velX.toFixed(3)), vy: parseFloat(c.velY.toFixed(3)), // 3 decimals for better precision
                     angle: Math.round(c.angle), boost: Math.round(c.boost), boosting: !!c.boosting 
                 };
                 
