@@ -7,12 +7,24 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Firebase SDK -->
     <script type="module">
+        // Using 11.6.1 to ensure compatibility with existing game logic imports
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, getDoc, updateDoc, onSnapshot, deleteDoc, writeBatch, serverTimestamp, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        const firebaseConfig = JSON.parse(__firebase_config || '{}');
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app';
+        // USER PROVIDED CONFIGURATION
+        const firebaseConfig = {
+            apiKey: "AIzaSyBWnSCQgMq0YoU14UCU5eg7nWZKwKSHuxA",
+            authDomain: "onlinecargame-4fe6a.firebaseapp.com",
+            projectId: "onlinecargame-4fe6a",
+            storageBucket: "onlinecargame-4fe6a.firebasestorage.app",
+            messagingSenderId: "1077083880146",
+            appId: "1:1077083880146:web:3e4c72737920de9c6f0b0b",
+            measurementId: "G-P86BC73C8P"
+        };
+
+        // Initialize Firebase
+        const appId = firebaseConfig.projectId; // Use projectId as appId for pathing
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
@@ -24,6 +36,7 @@
         };
 
         const statusEl = document.getElementById('connection-status');
+        // Note: Using projectId in the path to ensure data separation if needed, or just default 'app'
         const colRooms = collection(db, 'artifacts', appId, 'public', 'data', 'rooms');
         const colPlayers = collection(db, 'artifacts', appId, 'public', 'data', 'players');
         const colEntities = collection(db, 'artifacts', appId, 'public', 'data', 'entities');
@@ -31,11 +44,8 @@
 
         const initAuth = async () => {
             try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
+                // Try anonymous auth first as it's standard for this type of game
+                await signInAnonymously(auth);
             } catch (e) {
                 console.error("Auth Error:", e);
                 statusEl.textContent = "Auth Failed";
@@ -138,6 +148,15 @@
             await updateDoc(doc(colRooms, window.netState.currentRoomId), { status: 'playing' });
         };
 
+        // Added window.endMatch to handle game over logic in the correct scope
+        window.endMatch = async (winner, finalScore) => {
+             await updateDoc(doc(colRooms, window.netState.currentRoomId), {
+                status: 'finished',
+                winner: winner,
+                finalScore: finalScore
+            });
+        };
+
         window.sendGameUpdate = async (myEntities, ballData, gameData) => {
             const now = Date.now();
             if (now - window.netState.lastUpdateSent < 50) return; 
@@ -162,8 +181,14 @@
                 if(!snap.exists()) { alert("Room closed"); window.resetToMenu(); return; }
                 const data = snap.data();
                 window.updateLobbyUI(data);
+                
+                // Game Logic Transitions
                 if (data.status === 'playing' && window.gameState !== 'playing') window.initGame(data);
-                if (data.status === 'finished') { alert("Game Over"); window.resetToMenu(); }
+                
+                // Handle Game Over via Room Status
+                if (data.status === 'finished') {
+                    window.showGameOver(data);
+                }
             });
             const qPlayers = query(colPlayers, where('roomId', '==', roomId));
             window.netState.unsubPlayers = onSnapshot(qPlayers, (snap) => {
@@ -194,7 +219,6 @@
             overflow: hidden; margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh;
         }
         #app { 
-            /* WIDER MENU UI */
             width: 95vw; max-width: 1100px; 
             height: 90vh;
             position: relative; background: #1f2937; border-radius: 16px; 
@@ -202,7 +226,6 @@
             transition: all 0.5s ease; 
         }
         
-        /* GAME UI ADJUSTMENT */
         #app.in-game {
             max-width: 1400px;
             width: 98vw;
@@ -263,8 +286,10 @@
             padding: 10px 30px; pointer-events: none; z-index: 20;
         }
         .score-box { font-size: 2.5rem; font-weight: 900; text-shadow: 0 2px 8px rgba(0,0,0,0.8); display: flex; flex-direction: column; align-items: center; line-height: 1; }
-        .timer-box { font-family: monospace; font-size: 2rem; font-weight: bold; color: white; text-shadow: 0 2px 4px black; margin-bottom: 10px; }
-        .timer-box.points { font-size: 1.2rem; color: #fbbf24; text-transform: uppercase; letter-spacing: 1px; }
+        .timer-box { font-family: monospace; font-size: 2rem; font-weight: bold; color: white; text-shadow: 0 2px 4px black; margin-bottom: 10px; transition: all 0.3s ease; }
+        .timer-box.points { display: none; } /* HIDDEN IN POINTS MODE */
+        .timer-box.glow-red { color: #ef4444; text-shadow: 0 0 20px #ef4444; transform: scale(1.5); }
+        .timer-box.countdown { color: #ef4444; font-size: 6rem; position: absolute; bottom: 200px; left: 50%; transform: translateX(-50%); text-shadow: 4px 4px 0 #000; }
         
         .boost-container {
             width: 200px; height: 20px; background: #374151; border: 2px solid #4b5563;
@@ -273,9 +298,6 @@
         .boost-fill { height: 100%; background: linear-gradient(90deg, #f59e0b, #fbbf24); width: 100%; transition: width 0.1s linear; }
         .boost-text { position: absolute; top: 0; left: 0; width: 100%; text-align: center; font-size: 0.7rem; font-weight: bold; color: black; line-height: 18px; }
         
-        #goal-flash { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 50; pointer-events: none; opacity: 0; transition: opacity 0.5s; }
-        #goal-flash.visible { opacity: 1; }
-
     </style>
 </head>
 <body>
@@ -388,11 +410,29 @@
         </div>
     </div>
 
+    <!-- SCREEN: GAME OVER -->
+    <div id="screen-gameover" class="screen">
+        <h1 class="text-6xl font-black text-white mb-4 italic tracking-tighter">GAME OVER</h1>
+        <h2 id="go-winner" class="text-5xl font-bold mb-12" style="text-shadow: 0 4px 10px rgba(0,0,0,0.5);">BLUE WINS!</h2>
+        
+        <div class="flex gap-12 mb-12 items-center">
+            <div class="flex flex-col items-center">
+                <div class="text-blue-500 font-bold tracking-widest mb-2">BLUE</div>
+                <div id="go-score-left" class="text-8xl font-black text-white">0</div>
+            </div>
+            <div class="text-7xl font-black text-gray-700">-</div>
+            <div class="flex flex-col items-center">
+                <div class="text-red-500 font-bold tracking-widest mb-2">RED</div>
+                <div id="go-score-right" class="text-8xl font-black text-white">0</div>
+            </div>
+        </div>
+
+        <button class="btn btn-primary" onclick="window.leaveRoom()">RETURN TO MENU</button>
+    </div>
+
     <!-- SCREEN: GAME -->
     <div id="screen-game" class="screen">
-        <div id="goal-flash">
-            <h1 class="text-9xl font-black text-yellow-400 italic tracking-tighter" style="text-shadow: 10px 10px 0 rgba(0,0,0,0.5); -webkit-text-stroke: 4px black;">GOAL!</h1>
-        </div>
+        <!-- Removed GOAL! Flash text as requested -->
 
         <button class="absolute top-4 right-4 z-20 bg-red-900/80 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-xs font-bold border border-red-500/50" onclick="tryExitGame()">EXIT</button>
         
@@ -467,7 +507,7 @@ let remoteEntities = {};
 let score = { left: 0, right: 0 };
 let lastTime = 0;
 let localCar = null;
-let goalFlashTimer = 0;
+let gameTimer = 0; // Host-side timer
 
 window.onload = () => {
     canvas.width = FIELD_CONSTANTS.CANVAS_WIDTH;
@@ -534,6 +574,31 @@ function pauseGame() {
     window.sendGameUpdate(null, null, { paused: !isPaused });
 }
 
+window.showGameOver = (data) => {
+    switchScreen('screen-gameover');
+    document.getElementById('app').classList.remove('in-game'); // Restore UI sizing
+    
+    const winnerEl = document.getElementById('go-winner');
+    const sL = document.getElementById('go-score-left');
+    const sR = document.getElementById('go-score-right');
+    
+    if (data.finalScore) {
+        sL.innerText = data.finalScore.left;
+        sR.innerText = data.finalScore.right;
+    }
+
+    if (data.winner === 'blue') {
+        winnerEl.innerText = "BLUE WINS!";
+        winnerEl.className = "text-5xl font-bold mb-12 text-blue-500";
+    } else if (data.winner === 'red') {
+        winnerEl.innerText = "RED WINS!";
+        winnerEl.className = "text-5xl font-bold mb-12 text-red-500";
+    } else {
+        winnerEl.innerText = "IT'S A DRAW!";
+        winnerEl.className = "text-5xl font-bold mb-12 text-gray-400";
+    }
+};
+
 window.resetGameObjects = () => {
     gameState = 'menu';
     cars = []; ball = null; boostPads = []; score = {left:0, right:0};
@@ -541,7 +606,6 @@ window.resetGameObjects = () => {
     document.getElementById('slots-blue').innerHTML = '';
     document.getElementById('slots-red').innerHTML = '';
     document.getElementById('modal-exit').classList.add('hidden');
-    document.getElementById('goal-flash').classList.remove('visible');
 };
 
 // --- RENDERERS ---
@@ -698,7 +762,6 @@ class Car {
             this.x += this.velX * dt * 60; this.y += this.velY * dt * 60;
 
             // --- WALLS: CARS BLOCKED FROM GOAL ---
-            // Cars treat the entire back line as solid (no entry to net)
             let mw = this.width/2, mh = this.height/2;
             if (this.x < mw) { this.x = mw; this.velX *= -0.5; }
             if (this.x > FIELD_CONSTANTS.CANVAS_WIDTH - mw) { this.x = FIELD_CONSTANTS.CANVAS_WIDTH - mw; this.velX *= -0.5; }
@@ -774,7 +837,11 @@ class Car {
         else if (this.aiStuckState === 'reversing_small') { this.throttleDirection = -1; if (this.aiStuckStateTimer <= 0) { this.aiStuckState = 'none'; this.stuckInCornerTimer = 0; } }
     }
     draw() {
-        ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(-this.angle * Math.PI / 180);
+        ctx.save(); ctx.translate(this.x, this.y); 
+        
+        // Draw Car Body
+        ctx.save();
+        ctx.rotate(-this.angle * Math.PI / 180);
         ctx.fillStyle = this.color;
         ctx.beginPath(); ctx.roundRect(-25, -13, 50, 26, 4); ctx.fill();
         ctx.fillStyle = '#1f2937'; ctx.beginPath(); ctx.roundRect(-5, -10, 20, 20, 2); ctx.fill();
@@ -785,15 +852,29 @@ class Car {
             ctx.fillStyle = '#f59e0b'; ctx.beginPath(); ctx.moveTo(-28, 0); ctx.lineTo(-50 - Math.random()*10, -8); ctx.lineTo(-50 - Math.random()*10, 8); ctx.fill();
             ctx.fillStyle = '#fbbf24'; ctx.beginPath(); ctx.moveTo(-28, 0); ctx.lineTo(-40 - Math.random()*5, -4); ctx.lineTo(-40 - Math.random()*5, 4); ctx.fill();
         }
-        ctx.restore();
+        ctx.restore(); // End car rotation
+
+        // --- OVERHEAD BOOST BAR ---
+        // Draw above car, no rotation
+        ctx.fillStyle = '#374151'; 
+        ctx.fillRect(-20, -35, 40, 6); // Background
+        // Fill color based on amount
+        ctx.fillStyle = this.boost > 50 ? '#fbbf24' : (this.boost > 20 ? '#f59e0b' : '#ef4444');
+        ctx.fillRect(-19, -34, 38 * (this.boost/100), 4); // Fill
+
         ctx.fillStyle = 'white'; ctx.font = '10px Inter'; ctx.textAlign = 'center';
         const ownerName = window.netState.playerMap[this.ownerId]?.username;
-        ctx.fillText(this.isAI ? `AI` : (ownerName || 'P'), this.x, this.y - 25);
+        ctx.fillText(this.isAI ? `AI` : (ownerName || 'P'), 0, -40);
+
+        ctx.restore(); // End translate
     }
 }
 
 class Ball {
-    constructor(x, y) { this.x=x; this.y=y; this.velX=0; this.velY=0; this.radius=FIELD_CONSTANTS.BALL_RADIUS; }
+    constructor(x, y) { 
+        this.x=x; this.y=y; this.velX=0; this.velY=0; this.radius=FIELD_CONSTANTS.BALL_RADIUS; 
+        this.val = 1; // Multiplier (1, 2, or 3)
+    }
     update(dt) {
         if (window.netState.isHost) {
             this.x += this.velX*dt*60; this.y += this.velY*dt*60;
@@ -802,15 +883,28 @@ class Ball {
             if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius) { this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; }
             if (this.y<this.radius) { this.y=this.radius; this.velY*=-0.8; }
             if (this.y>FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius) { this.y=FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius; this.velY*=-0.8; }
-            // NOTE: Ball collision with back of goal is irrelevant because checkGoal handles the score event at the line
         } else {
             const d = remoteEntities['ball'];
-            if(d) { this.x+=(d.x-this.x)*0.3; this.y+=(d.y-this.y)*0.3; }
+            if(d) { 
+                this.x+=(d.x-this.x)*0.3; this.y+=(d.y-this.y)*0.3; 
+                this.val = d.val || 1; // Sync value
+            }
         }
     }
     draw() {
-        ctx.fillStyle = '#00fff4'; ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2); ctx.fill();
+        // Color based on multiplier
+        if(this.val === 3) ctx.fillStyle = '#ffd700'; // Gold
+        else if(this.val === 2) ctx.fillStyle = '#a855f7'; // Purple
+        else ctx.fillStyle = '#00fff4'; // Cyan
+
+        ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2); ctx.fill();
         ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.beginPath(); ctx.arc(this.x-5, this.y-5, 6, 0, Math.PI*2); ctx.fill();
+        
+        // Draw multiplier text if > 1
+        if(this.val > 1) {
+            ctx.fillStyle = '#000'; ctx.font = 'bold 14px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText(`x${this.val}`, this.x, this.y);
+        }
     }
 }
 
@@ -820,8 +914,7 @@ window.initGame = (roomData) => {
     switchScreen('screen-game');
     roomSettings = roomData;
     cars = []; boostPads = []; score = {left:0, right:0};
-    goalFlashTimer = 0;
-    document.getElementById('goal-flash').classList.remove('visible');
+    gameTimer = roomData.duration; // Initialize Host Timer
     
     const padLocs = [{x: 200, y: 200}, {x: 800, y: 200}, {x: 200, y: 400}, {x: 800, y: 400}, {x: 500, y: 100}, {x: 500, y: 500}];
     padLocs.forEach(p => boostPads.push(new BoostPad(p.x, p.y)));
@@ -857,25 +950,64 @@ window.initGame = (roomData) => {
 };
 
 window.handleGameStateUpdate = (data) => {
-    if (data.ball) remoteEntities['ball'] = data.ball;
+    if (data.ball) {
+        remoteEntities['ball'] = data.ball;
+        if(ball) ball.val = data.ball.val || 1;
+    }
     if (data.scores) { 
         document.getElementById('score-left').innerText = data.scores.left; 
         document.getElementById('score-right').innerText = data.scores.right; 
     }
     if (data.timer !== undefined) { 
         const tBox = document.getElementById('game-timer');
+        
+        // --- LOGIC FOR POINTS VS TIMED VISIBILITY ---
         if (roomSettings.type === 'points') {
-            tBox.innerText = `FIRST TO ${roomSettings.scoreTarget}`;
-            tBox.classList.add('points');
+            tBox.classList.add('points'); // Hides it via CSS
+            tBox.classList.remove('countdown');
         } else {
-            const m = Math.floor(data.timer/60), s = Math.floor(data.timer%60); 
-            tBox.innerText = `${m}:${s<10?'0'+s:s}`;
             tBox.classList.remove('points');
+            
+            // Handle red countdown for last 10 seconds
+            if (data.timer <= 10 && data.timer > 0) {
+                tBox.classList.add('countdown');
+                tBox.innerText = Math.ceil(data.timer); // Just the number
+            } else {
+                tBox.classList.remove('countdown');
+                const m = Math.floor(data.timer/60), s = Math.floor(data.timer%60); 
+                tBox.innerText = `${m}:${s<10?'0'+s:s}`;
+            }
+
+            // Handle 30s or Half-time Flash
+            const duration = roomSettings.duration || 120;
+            const isHalf = Math.abs(data.timer - duration/2) < 0.5;
+            const is30 = Math.abs(data.timer - 30) < 0.5;
+            
+            if (isHalf || is30) {
+                if (!tBox.dataset.flashed) {
+                    tBox.classList.add('glow-red');
+                    tBox.dataset.flashed = "true";
+                    setTimeout(() => tBox.classList.remove('glow-red'), 1000);
+                }
+            } else {
+                tBox.dataset.flashed = "";
+            }
         }
     }
     if (data.paused !== undefined) { const m = document.getElementById('modal-pause'); if(data.paused) m.classList.remove('hidden'); else m.classList.add('hidden'); }
 };
 window.handleRemoteEntityUpdate = (data) => { Object.keys(data).forEach(k => remoteEntities[k] = data[k]); };
+
+// Host Helper: End Game
+async function finishGame(winner) {
+    if(gameState !== 'playing') return;
+    gameState = 'finished';
+    
+    // Use the new global helper instead of calling firebase directly
+    if (window.endMatch) {
+        await window.endMatch(winner, score);
+    }
+}
 
 function loop() {
     if (gameState !== 'playing') return requestAnimationFrame(loop);
@@ -885,9 +1017,29 @@ function loop() {
     drawField(ctx, canvas);
 
     const isPaused = !document.getElementById('modal-pause').classList.contains('hidden');
-    if (goalFlashTimer > 0) { goalFlashTimer -= dt; if (goalFlashTimer <= 0) document.getElementById('goal-flash').classList.remove('visible'); }
 
     if (!isPaused) {
+        // --- HOST WIN CONDITIONS ---
+        if (window.netState.isHost) {
+            // 1. Timed Mode Check
+            if (roomSettings.type === 'timed') {
+                gameTimer -= dt;
+                if (gameTimer <= 0) {
+                    gameTimer = 0;
+                    // Time up, check scores
+                    if (score.left > score.right) finishGame('blue');
+                    else if (score.right > score.left) finishGame('red');
+                    else finishGame('draw');
+                }
+            }
+            // 2. Points Mode Check
+            if (roomSettings.type === 'points') {
+                const target = roomSettings.scoreTarget;
+                if (score.left >= target) finishGame('blue');
+                else if (score.right >= target) finishGame('red');
+            }
+        }
+
         boostPads.forEach(p => { p.update(dt); p.draw(); });
         ball.update(dt);
         
@@ -930,25 +1082,34 @@ function loop() {
 
         if (Object.keys(myUpdateData).length > 0) {
             let ballData = null;
-            if (window.netState.isHost) ballData = { x: Math.round(ball.x), y: Math.round(ball.y) };
-            window.sendGameUpdate(myUpdateData, ballData, null);
+            if (window.netState.isHost) ballData = { x: Math.round(ball.x), y: Math.round(ball.y), val: ball.val };
+            window.sendGameUpdate(myUpdateData, ballData, window.netState.isHost ? { scores: score, timer: gameTimer, paused: isPaused } : null);
         }
         
-        // HOST LOGIC: Scoring using provided checkGoal
+        // HOST LOGIC: Scoring
         if (window.netState.isHost) {
             const scoringTeam = checkGoal(ball, canvas);
             if (scoringTeam) {
-                if (scoringTeam === 'left') score.left++;
-                if (scoringTeam === 'right') score.right++;
+                const points = ball.val; // 1, 2, or 3
+                if (scoringTeam === 'left') score.left += points;
+                if (scoringTeam === 'right') score.right += points;
                 
                 // Reset
-                ball.x = 500; ball.y = 300; ball.velX = 0; ball.velY = 0; 
+                ball.x = 500; 
+                ball.y = Math.max(50, Math.min(550, 300 + (Math.random() - 0.5) * 500)); 
+                ball.velX = 0; ball.velY = 0; 
+
+                const rand = Math.random();
+                if (rand < 0.05) ball.val = 3; 
+                else if (rand < 0.15) ball.val = 2; 
+                else ball.val = 1;
+
                 cars.forEach(c => {
                     if(c.resetPos) { c.x = c.resetPos.x; c.y = c.resetPos.y; c.angle = c.resetPos.angle; c.velX = 0; c.velY = 0; c.boost = 100; }
                 });
-                document.getElementById('goal-flash').classList.add('visible');
-                goalFlashTimer = 2.0;
-                window.sendGameUpdate({}, {x:500,y:300}, { scores: score }); 
+                
+                // Removed Goal Flash Trigger
+                window.sendGameUpdate({}, {x:ball.x, y:ball.y, val:ball.val}, { scores: score, timer: gameTimer }); 
             }
         }
     }
