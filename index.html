@@ -587,15 +587,36 @@ window.showGameOver = (data) => {
         sR.innerText = data.finalScore.right;
     }
 
-    if (data.winner === 'blue') {
-        winnerEl.innerText = "BLUE WINS!";
-        winnerEl.className = "text-5xl font-bold mb-12 text-blue-500";
-    } else if (data.winner === 'red') {
-        winnerEl.innerText = "RED WINS!";
-        winnerEl.className = "text-5xl font-bold mb-12 text-red-500";
-    } else {
+    // Personalize Win/Loss Message
+    const myUid = window.netState.user.uid;
+    const myPlayer = window.netState.playerMap[myUid];
+    const myTeam = (myPlayer && (myPlayer.team === 'left' || myPlayer.team === 'right')) 
+        ? (myPlayer.team === 'left' ? 'blue' : 'red') // Normalize 'left'->'blue', 'right'->'red'
+        : null;
+
+    if (data.winner === 'draw') {
         winnerEl.innerText = "IT'S A DRAW!";
         winnerEl.className = "text-5xl font-bold mb-12 text-gray-400";
+    } else {
+        if (myTeam) {
+            // If playing
+            if (myTeam === data.winner) {
+                winnerEl.innerText = "YOU WIN!";
+                winnerEl.className = "text-6xl font-black mb-12 text-green-500 italic tracking-tight";
+            } else {
+                winnerEl.innerText = "YOU LOSE!";
+                winnerEl.className = "text-6xl font-black mb-12 text-red-500 italic tracking-tight";
+            }
+        } else {
+            // Spectating
+            if (data.winner === 'blue') {
+                winnerEl.innerText = "BLUE WINS!";
+                winnerEl.className = "text-5xl font-bold mb-12 text-blue-500";
+            } else {
+                winnerEl.innerText = "RED WINS!";
+                winnerEl.className = "text-5xl font-bold mb-12 text-red-500";
+            }
+        }
     }
 };
 
@@ -875,9 +896,10 @@ class Ball {
     constructor(x, y) { 
         this.x=x; this.y=y; this.velX=0; this.velY=0; this.radius=FIELD_CONSTANTS.BALL_RADIUS; 
         this.val = 1; // Multiplier (1, 2, or 3)
+        this.lastLocalHit = 0; // Timestamp of last local collision
     }
     update(dt) {
-        // CLIENT-SIDE PREDICTION FOR EVERYONE (Previously only Host did this)
+        // CLIENT-SIDE PREDICTION FOR EVERYONE
         this.x += this.velX*dt*60; this.y += this.velY*dt*60;
         this.velX *= 0.98; this.velY *= 0.98;
         if (this.x<this.radius) { this.x=this.radius; this.velX*=-0.8; }
@@ -886,18 +908,23 @@ class Ball {
         if (this.y>FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius) { this.y=FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius; this.velY*=-0.8; }
 
         if (!window.netState.isHost) {
-            // RECONCILIATION: Smoothly blend local prediction with server truth
-            const d = remoteEntities['ball'];
-            if(d) { 
-                const dist = Math.hypot(d.x - this.x, d.y - this.y);
-                // If discrepancy is small, blend smooth (0.1). If large (teleport), snap instantly.
-                if(dist > 200) {
-                    this.x = d.x; this.y = d.y;
-                } else {
-                    this.x += (d.x - this.x) * 0.1; 
-                    this.y += (d.y - this.y) * 0.1; 
+            // RECONCILIATION
+            // Only reconcile if we haven't hit the ball recently (500ms)
+            // This prevents the server from "undoing" our shot immediately
+            if (Date.now() - this.lastLocalHit > 500) {
+                const d = remoteEntities['ball'];
+                if(d) { 
+                    const dist = Math.hypot(d.x - this.x, d.y - this.y);
+                    // If discrepancy is large (teleport), snap instantly.
+                    if(dist > 200) {
+                        this.x = d.x; this.y = d.y;
+                    } else {
+                        // Smooth blend
+                        this.x += (d.x - this.x) * 0.1; 
+                        this.y += (d.y - this.y) * 0.1; 
+                    }
+                    this.val = d.val || 1; // Sync value
                 }
-                this.val = d.val || 1; // Sync value
             }
         }
     }
@@ -1079,10 +1106,11 @@ function loop() {
                     const angle = Math.atan2(dy, dx), overlap = (FIELD_CONSTANTS.BALL_RADIUS + 50/2) - dist;
                     c.x -= Math.cos(angle) * overlap; c.y -= Math.sin(angle) * overlap;
                     c.velX -= Math.cos(angle) * 5; c.velY -= Math.sin(angle) * 5;
-                    // NEW: Apply ball physics LOCALLY for everyone to reduce lag feel
-                    // Previously: if (window.netState.isHost) { ... }
+                    // Apply ball physics LOCALLY for everyone
                     ball.velX += Math.cos(angle) * 15; 
                     ball.velY += Math.sin(angle) * 15;
+                    // RECORD HIT TIME TO PREVENT SERVER RECONCILIATION OVERRIDE
+                    ball.lastLocalHit = Date.now();
                 }
             }
         });
