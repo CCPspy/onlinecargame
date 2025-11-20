@@ -50,10 +50,9 @@
             try {
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     try {
-                        // Try to use the environment token first
                         await signInWithCustomToken(auth, __initial_auth_token);
                     } catch (tokenError) {
-                        console.warn("Token mismatch (expected for custom Firebase config), falling back to Anonymous Auth:", tokenError);
+                        console.warn("Token mismatch, falling back to Anonymous Auth:", tokenError);
                         await signInAnonymously(auth);
                     }
                 } else {
@@ -121,49 +120,31 @@
             } catch(e) { console.error(e); }
         }
 
-        // --- LEAVE GAME FIX ---
         window.leaveRoom = async () => {
             const roomId = window.netState.currentRoomId;
             if (!roomId) { window.resetToMenu(); return; }
             const uid = window.netState.user.uid;
             
-            // Unsubscribe from listeners FIRST
             if(window.netState.unsubRoom) window.netState.unsubRoom();
             if(window.netState.unsubPlayers) window.netState.unsubPlayers();
             if(window.netState.unsubEntities) window.netState.unsubEntities();
             if(window.netState.unsubGameState) window.netState.unsubGameState();
             
             try { 
-                // If user is host, delete the room, gamestate, and all player/entity docs
                 if (window.netState.isHost) {
                     const batch = window.writeBatch(db);
-                    
-                    // 1. Delete Room
                     batch.delete(doc(colRooms, roomId));
-                    
-                    // 2. Delete GameState
                     batch.delete(doc(colGameStates, roomId));
-                    
-                    // 3. Delete all players in the room
                     Object.keys(window.netState.playerMap).forEach(playerId => {
                         batch.delete(doc(colPlayers, `${roomId}_${playerId}`));
-                    });
-                    
-                    // 4. Delete all entity docs for those players
-                     Object.keys(window.netState.playerMap).forEach(playerId => {
                         batch.delete(doc(colEntities, `${roomId}_${playerId}`));
                     });
-                    
                     await batch.commit();
                 } else {
-                    // Just delete this one player's doc
                     await window.deleteDoc(doc(colPlayers, `${roomId}_${uid}`)); 
                 }
-            } catch(e) { 
-                console.error("Error during leaveRoom cleanup:", e);
-            }
-            
-            window.resetToMenu(); // This resets local state and UI
+            } catch(e) { console.error("Error during leaveRoom cleanup:", e); }
+            window.resetToMenu(); 
         };
 
         window.resetToMenu = () => {
@@ -195,7 +176,7 @@
 
         window.sendGameUpdate = async (myEntities, ballData, gameData) => {
             const now = Date.now();
-            if (now - window.netState.lastUpdateSent < 50) return; // 20fps
+            if (now - window.netState.lastUpdateSent < 50) return; // 20fps cap
             window.netState.lastUpdateSent = now;
             
             const roomId = window.netState.currentRoomId;
@@ -228,11 +209,7 @@
             window.netState.currentRoomId = roomId;
             window.netState.unsubRoom = onSnapshot(doc(colRooms, roomId), (snap) => {
                 if(!snap.exists()) { 
-                    setTimeout(() => {
-                        if (window.netState.currentRoomId) { 
-                            window.leaveRoom();
-                        }
-                    }, 100);
+                    setTimeout(() => { if (window.netState.currentRoomId) window.leaveRoom(); }, 100);
                     return; 
                 }
                 const data = snap.data();
@@ -573,7 +550,7 @@ function validateName() {
     const n = document.getElementById('inp-name').value.trim();
     const err = document.getElementById('name-error');
     if(n.length < 3) { err.style.opacity = '1'; return null; }
-    err.style.opacity = '0'; return n.toUpperCase(); // --- FIX: Auto Uppercase Input ---
+    err.style.opacity = '0'; return n.toUpperCase();
 }
 function goToModeSelect() { const name = validateName(); if(name) { window.username = name; switchScreen('screen-mode'); } }
 function goToJoin() { const name = validateName(); if(name) { window.username = name; switchScreen('screen-join'); } }
@@ -693,8 +670,6 @@ window.renderSlots = (players) => {
     }
 };
 
-// --- EXTRACTED MECHANICS ---
-
 function drawField(ctx, canvas) {
     ctx.fillStyle = FIELD_CONSTANTS.COLOR_FIELD;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -716,7 +691,6 @@ function drawField(ctx, canvas) {
 
 function checkGoal(ball, canvas) {
     let goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT;
-    // --- FIX: Use Inclusive checks (>=, <=) to catch boundary cases ---
     if (ball.y >= canvas.height/2 - goalHeight/2 && ball.y <= canvas.height/2 + goalHeight/2) {
         if (ball.x - ball.radius <= 0) return 'right';
         if (ball.x + ball.radius >= canvas.width) return 'left';
@@ -753,6 +727,7 @@ class Car {
     }
     update(dt) {
         if (this.ownerId === window.netState.user.uid) {
+            // --- LOCAL/OWNER LOGIC ---
             let throttle = 0;
             if (this.isAI) { this.handleAI(dt, ball, cars); throttle = this.aiThrottle; } 
             else {
@@ -785,25 +760,40 @@ class Car {
             boostPads.forEach(pad => {
                 if (pad.active && Math.hypot(this.x-pad.x, this.y-pad.y) < this.width/2 + pad.radius) {
                     this.boost = Math.min(100, this.boost + 20);
-                    // Host handles state logic, Client just predicts visual removal locally if they hit it
-                    // but doesn't set active=false for everyone. The Host update loop will confirm it.
                     if (window.netState.isHost) {
                         pad.active = false; pad.cooldown = 5.0;
                     } else {
-                        // Visual prediction
-                        pad.active = false; 
+                        pad.active = false; // Visual prediction
                     }
                 }
             });
         } else {
+            // --- REMOTE PLAYER LOGIC (SMOOTHED) ---
             const data = remoteEntities[this.id];
             if (data) {
-                this.x += (data.x - this.x) * 0.3; 
-                this.y += (data.y - this.y) * 0.3; 
+                // 1. Update local velocity to match server velocity (Dead Reckoning)
+                // If server provides velocity, use it. Else 0.
+                this.velX = data.vx || 0;
+                this.velY = data.vy || 0;
+
+                // 2. Apply physics based on that velocity
+                this.x += this.velX * dt * 60; 
+                this.y += this.velY * dt * 60; 
+
+                // 3. Gently correct position error (Lerp)
+                // Instead of just snapping, we pull the car towards the authoritative position
+                const targetX = data.x;
+                const targetY = data.y;
+                this.x += (targetX - this.x) * 0.15; 
+                this.y += (targetY - this.y) * 0.15; 
+
+                // 4. Angle Interpolation
                 let d = data.angle - this.angle;
                 while (d < -180) d += 360; while (d > 180) d -= 360;
-                this.angle += d * 0.3; 
-                this.boost = data.boost || 100; this.boosting = data.boosting || false;
+                this.angle += d * 0.2; 
+
+                this.boost = data.boost || 100; 
+                this.boosting = data.boosting || false;
             }
         }
     }
@@ -880,7 +870,6 @@ class Car {
 
         ctx.fillStyle = 'white'; ctx.font = '10px Inter'; ctx.textAlign = 'center';
         const ownerName = window.netState.playerMap[this.ownerId]?.username;
-        // --- FIX: Always Uppercase Name ---
         ctx.fillText(this.isAI ? `AI` : (ownerName || 'P').toUpperCase(), 0, -40);
 
         ctx.restore(); 
@@ -894,7 +883,7 @@ class Ball {
     }
     
     update(dt) {
-        // --- ALWAYS RUN LOCAL PHYSICS ---
+        // --- ALWAYS RUN LOCAL PHYSICS (Prediction) ---
         this.x += this.velX*dt*60; this.y += this.velY*dt*60;
         this.velX *= 0.98; this.velY *= 0.98;
         
@@ -910,24 +899,29 @@ class Ball {
         if (this.x<this.radius && !inGoalY) { this.x=this.radius; this.velX*=-0.8; }
         if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius && !inGoalY) { this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; }
         
-        // --- CLIENT SIDE RECONCILIATION (FIXED LAG) ---
+        // --- CLIENT SIDE RECONCILIATION WITH VELOCITY ---
         if (!window.netState.isHost) {
             const d = remoteEntities['ball'];
             if(d) { 
                 const timeSinceHit = Date.now() - lastBallHitTime;
                 const dist = Math.hypot(d.x - this.x, d.y - this.y);
 
-                // TRUST WINDOW IMPROVED:
-                // If we hit the ball recently (<800ms), ignore server to allow local physics to play out smoothly.
-                // Unless deviation is massive (>400px), which means we were totally wrong.
+                // Trust local hit for 800ms
                 if (timeSinceHit < 800 && dist < 400) {
-                    // Trust local physics completely
+                    // Trust local
                 } else {
+                    // --- NEW: Velocity Sync (Dead Reckoning) ---
                     if (dist > 300) { 
                         // Hard snap if too far
                         this.x = d.x; this.y = d.y; 
+                        this.velX = d.vx || 0; this.velY = d.vy || 0;
                     } else {
-                        // Smoother lerp (reduced from 0.3 to 0.15 to prevent jitter)
+                        // Soft sync: Apply server velocity to local + correct position drift
+                        if(d.vx !== undefined) {
+                             this.velX = d.vx; 
+                             this.velY = d.vy;
+                        }
+                        // Gently pull position to server pos
                         this.x += (d.x - this.x) * 0.15; 
                         this.y += (d.y - this.y) * 0.15; 
                     }
@@ -1005,7 +999,7 @@ window.handleGameStateUpdate = (data) => {
         document.getElementById('score-right').innerText = data.scores.right; 
         score = data.scores; 
     }
-    // --- FIX: Sync Pads from Server ---
+    // Sync Pads
     if (data.pads && boostPads.length > 0) {
         data.pads.forEach((active, i) => {
             if (boostPads[i]) boostPads[i].active = !!active;
@@ -1109,7 +1103,6 @@ async function loop() {
         }
 
         boostPads.forEach(p => { 
-            // Only Host updates cooldown timers to ensure sync
             if (window.netState.isHost) p.update(dt); 
             p.draw(); 
         });
@@ -1145,19 +1138,22 @@ async function loop() {
         cars.forEach(c => {
             c.update(dt); c.draw();
             if (c.ownerId === window.netState.user.uid) {
-                myUpdateData[c.id] = { x: Math.round(c.x), y: Math.round(c.y), angle: Math.round(c.angle), boost: Math.round(c.boost), boosting: !!c.boosting };
+                // --- ADDED: Velocity (vx, vy) for smoother prediction on clients ---
+                myUpdateData[c.id] = { 
+                    x: Math.round(c.x), y: Math.round(c.y), 
+                    vx: parseFloat(c.velX.toFixed(2)), vy: parseFloat(c.velY.toFixed(2)),
+                    angle: Math.round(c.angle), boost: Math.round(c.boost), boosting: !!c.boosting 
+                };
+                
                 const dx = ball.x - c.x, dy = ball.y - c.y, dist = Math.hypot(dx, dy);
                 if (dist < FIELD_CONSTANTS.BALL_RADIUS + 50/2) {
                     const angle = Math.atan2(dy, dx), overlap = (FIELD_CONSTANTS.BALL_RADIUS + 50/2) - dist;
                     c.x -= Math.cos(angle) * overlap; c.y -= Math.sin(angle) * overlap;
                     c.velX -= Math.cos(angle) * 5; c.velY -= Math.sin(angle) * 5;
                     
-                    // --- FIX: Client-side Ball Hit ---
-                    // Apply velocity immediately to local ball
                     ball.velX += Math.cos(angle) * 15; 
                     ball.velY += Math.sin(angle) * 15;
                     
-                    // Record timestamp so we ignore server updates for a short while
                     lastBallHitTime = Date.now();
                 }
             }
@@ -1174,19 +1170,21 @@ async function loop() {
             let gameData = null;
             
             if (window.netState.isHost) {
-                ballData = { x: Math.round(ball.x), y: Math.round(ball.y), val: ball.val };
-                // --- FIX: Send Pad States ---
+                // --- ADDED: Velocity for Ball ---
+                ballData = { 
+                    x: Math.round(ball.x), y: Math.round(ball.y), 
+                    vx: parseFloat(ball.velX.toFixed(2)), vy: parseFloat(ball.velY.toFixed(2)),
+                    val: ball.val 
+                };
                 const padStates = boostPads.map(p => p.active ? 1 : 0);
                 gameData = { scores: score, timer: gameTimer, paused: isPaused, pads: padStates };
             }
             
-            // Only send network request if we have car data OR we are host sending game state
             if (Object.keys(myUpdateData).length > 0 || window.netState.isHost) {
                 window.sendGameUpdate(Object.keys(myUpdateData).length ? myUpdateData : null, ballData, gameData);
             }
         }
         
-        // HOST LOGIC: Scoring
         if (window.netState.isHost) {
             const scoringTeam = checkGoal(ball, canvas);
             if (scoringTeam) {
