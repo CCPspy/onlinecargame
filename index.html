@@ -728,7 +728,8 @@ class Car {
         this.id = id; this.x = x; this.y = y; this.angle = angle;
         this.team = team; this.isLocal = isLocal; this.isAI = isAI; this.ownerId = ownerId;
         this.velX=0; this.velY=0; this.baseAcceleration=0.3; this.baseMaxSpeed=5.0;
-        this.baseRotationSpeed=4.5; this.baseSideFrictionFactor=0.05;
+        this.baseRotationSpeed=3.0; // Reduced from 4.5
+        this.baseSideFrictionFactor=0.05;
         this.boostPower=1.8; this.boost=100; 
         this.width=50; this.height=25;
         this.color=team==='left'?'#0066cc':'#cc0000'; this.boosting=false;
@@ -876,17 +877,26 @@ class Ball {
         this.val = 1; // Multiplier (1, 2, or 3)
     }
     update(dt) {
-        if (window.netState.isHost) {
-            this.x += this.velX*dt*60; this.y += this.velY*dt*60;
-            this.velX *= 0.98; this.velY *= 0.98;
-            if (this.x<this.radius) { this.x=this.radius; this.velX*=-0.8; }
-            if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius) { this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; }
-            if (this.y<this.radius) { this.y=this.radius; this.velY*=-0.8; }
-            if (this.y>FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius) { this.y=FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius; this.velY*=-0.8; }
-        } else {
+        // CLIENT-SIDE PREDICTION FOR EVERYONE (Previously only Host did this)
+        this.x += this.velX*dt*60; this.y += this.velY*dt*60;
+        this.velX *= 0.98; this.velY *= 0.98;
+        if (this.x<this.radius) { this.x=this.radius; this.velX*=-0.8; }
+        if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius) { this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; }
+        if (this.y<this.radius) { this.y=this.radius; this.velY*=-0.8; }
+        if (this.y>FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius) { this.y=FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius; this.velY*=-0.8; }
+
+        if (!window.netState.isHost) {
+            // RECONCILIATION: Smoothly blend local prediction with server truth
             const d = remoteEntities['ball'];
             if(d) { 
-                this.x+=(d.x-this.x)*0.3; this.y+=(d.y-this.y)*0.3; 
+                const dist = Math.hypot(d.x - this.x, d.y - this.y);
+                // If discrepancy is small, blend smooth (0.1). If large (teleport), snap instantly.
+                if(dist > 200) {
+                    this.x = d.x; this.y = d.y;
+                } else {
+                    this.x += (d.x - this.x) * 0.1; 
+                    this.y += (d.y - this.y) * 0.1; 
+                }
                 this.val = d.val || 1; // Sync value
             }
         }
@@ -1069,7 +1079,10 @@ function loop() {
                     const angle = Math.atan2(dy, dx), overlap = (FIELD_CONSTANTS.BALL_RADIUS + 50/2) - dist;
                     c.x -= Math.cos(angle) * overlap; c.y -= Math.sin(angle) * overlap;
                     c.velX -= Math.cos(angle) * 5; c.velY -= Math.sin(angle) * 5;
-                    if (window.netState.isHost) { ball.velX += Math.cos(angle) * 15; ball.velY += Math.sin(angle) * 15; }
+                    // NEW: Apply ball physics LOCALLY for everyone to reduce lag feel
+                    // Previously: if (window.netState.isHost) { ... }
+                    ball.velX += Math.cos(angle) * 15; 
+                    ball.velY += Math.sin(angle) * 15;
                 }
             }
         });
