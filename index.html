@@ -32,7 +32,9 @@
         window.netState = {
             db, auth, user: null, currentRoomId: null, isHost: false,
             unsubRoom: null, unsubPlayers: null, unsubEntities: null, unsubGameState: null,
-            lastUpdateSent: 0, playerMap: {}, connectedPlayersList: []
+            lastUpdateSent: 0, playerMap: {}, connectedPlayersList: [],
+            lastSentString: "", // For deduping writes
+            quotaExceeded: false // Safety flag
         };
 
         const statusEl = document.getElementById('connection-status');
@@ -71,6 +73,7 @@
         window.hostConfig = { mode: '1v1', type: 'timed', duration: 120, scoreTarget: 5 };
 
         window.finalizeCreateRoom = async () => {
+            if (window.netState.quotaExceeded) return alert("Daily quota exceeded. Try again tomorrow.");
             const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
             await setDoc(doc(colRooms, roomId), {
                 ...window.hostConfig,
@@ -83,6 +86,7 @@
         };
 
         window.joinRoom = async (code) => {
+            if (window.netState.quotaExceeded) return alert("Daily quota exceeded. Try again tomorrow.");
             const roomId = code.trim().toUpperCase();
             const roomSnap = await getDoc(doc(colRooms, roomId));
             if (!roomSnap.exists()) throw new Error("Room not found");
@@ -113,7 +117,9 @@
             if(window.netState.unsubEntities) window.netState.unsubEntities();
             if(window.netState.unsubGameState) window.netState.unsubGameState();
             
-            try { await deleteDoc(pDoc); } catch(e) {}
+            if (!window.netState.quotaExceeded) {
+                try { await deleteDoc(pDoc); } catch(e) {}
+            }
             window.resetToMenu();
         };
 
@@ -128,6 +134,7 @@
         };
 
         window.toggleReady = async () => {
+            if (window.netState.quotaExceeded) return;
             const uid = window.netState.user.uid;
             const p = window.netState.playerMap[uid];
             if(!p || p.slotIndex === -1) return;
@@ -135,21 +142,25 @@
         };
 
         window.claimSlot = async (idx) => {
+            if (window.netState.quotaExceeded) return;
             const uid = window.netState.user.uid;
             const team = idx % 2 === 0 ? 'left' : 'right';
             await updateDoc(doc(colPlayers, `${window.netState.currentRoomId}_${uid}`), { slotIndex: idx, team: team, isReady: false });
         };
 
         window.updateSettings = async (updateObj) => {
+            if (window.netState.quotaExceeded) return;
             await updateDoc(doc(colRooms, window.netState.currentRoomId), updateObj);
         };
         
         window.startGame = async () => {
+            if (window.netState.quotaExceeded) return;
             await updateDoc(doc(colRooms, window.netState.currentRoomId), { status: 'playing' });
         };
 
         // Added window.endMatch to handle game over logic in the correct scope
         window.endMatch = async (winner, finalScore) => {
+             if (window.netState.quotaExceeded) return;
              await updateDoc(doc(colRooms, window.netState.currentRoomId), {
                 status: 'finished',
                 winner: winner,
@@ -158,21 +169,48 @@
         };
 
         window.sendGameUpdate = async (myEntities, ballData, gameData) => {
+            if (window.netState.quotaExceeded) return; // Stop sending if quota dead
+
             const now = Date.now();
-            if (now - window.netState.lastUpdateSent < 50) return; 
+            // FIX: Increased throttle to 500ms (2 updates/sec) for aggressive quota savings
+            if (now - window.netState.lastUpdateSent < 500) return; 
+            
+            // OPTIMIZATION: Check if data changed significantly
+            // Create a lightweight representation for comparison
+            const currentPayload = { e: myEntities, b: ballData, g: gameData };
+            const currentString = JSON.stringify(currentPayload);
+            if (currentString === window.netState.lastSentString) return; // IDLE CHECK: Don't write if identical
+            
             window.netState.lastUpdateSent = now;
+            window.netState.lastSentString = currentString;
+
             const roomId = window.netState.currentRoomId;
             const uid = window.netState.user.uid;
             const batch = writeBatch(db);
             const entId = `${roomId}_${uid}`;
-            batch.set(doc(colEntities, entId), { roomId, userId: uid, data: myEntities, ts: serverTimestamp() });
+            
+            // Only update entities if they exist (don't write null)
+            if (myEntities) {
+                batch.set(doc(colEntities, entId), { roomId, userId: uid, data: myEntities, ts: serverTimestamp() });
+            }
+            
             if (ballData || gameData) {
                 const update = { roomId };
                 if(ballData) update.ball = ballData;
                 if(gameData) { update.scores = gameData.scores; update.timer = gameData.timer; update.paused = gameData.paused; }
                 batch.set(doc(colGameStates, roomId), update, { merge: true });
             }
-            try { await batch.commit(); } catch(e) {}
+
+            try { 
+                await batch.commit(); 
+            } catch(e) {
+                if (e.code === 'resource-exhausted') {
+                    console.error("FIREBASE QUOTA EXCEEDED. Stopping updates.");
+                    window.netState.quotaExceeded = true;
+                    statusEl.innerText = "Quota Exceeded";
+                    statusEl.className = "text-red-600 font-black text-sm blink";
+                }
+            }
         };
 
         function subscribeToRoom(roomId) {
@@ -189,7 +227,10 @@
                 if (data.status === 'finished') {
                     window.showGameOver(data);
                 }
+            }, (error) => {
+                if (error.code === 'resource-exhausted') window.netState.quotaExceeded = true;
             });
+
             const qPlayers = query(colPlayers, where('roomId', '==', roomId));
             window.netState.unsubPlayers = onSnapshot(qPlayers, (snap) => {
                 const list = [];
@@ -199,16 +240,18 @@
                 const me = list.find(p => p.id === window.netState.user.uid);
                 if(me) window.netState.isHost = me.isHost;
                 window.renderSlots(list);
-            });
+            }, (error) => { if (error.code === 'resource-exhausted') window.netState.quotaExceeded = true; });
+
             const qEntities = query(colEntities, where('roomId', '==', roomId));
             window.netState.unsubEntities = onSnapshot(qEntities, (snap) => {
                 snap.forEach(d => {
                     if(d.data().userId !== window.netState.user.uid) window.handleRemoteEntityUpdate(d.data().data);
                 });
-            });
+            }, (error) => { if (error.code === 'resource-exhausted') window.netState.quotaExceeded = true; });
+
             window.netState.unsubGameState = onSnapshot(doc(colGameStates, roomId), (snap) => {
                 if(snap.exists()) window.handleGameStateUpdate(snap.data());
-            });
+            }, (error) => { if (error.code === 'resource-exhausted') window.netState.quotaExceeded = true; });
         }
     </script>
 
@@ -298,6 +341,9 @@
         .boost-fill { height: 100%; background: linear-gradient(90deg, #f59e0b, #fbbf24); width: 100%; transition: width 0.1s linear; }
         .boost-text { position: absolute; top: 0; left: 0; width: 100%; text-align: center; font-size: 0.7rem; font-weight: bold; color: black; line-height: 18px; }
         
+        .blink { animation: blinker 1s linear infinite; }
+        @keyframes blinker { 50% { opacity: 0; } }
+
     </style>
 </head>
 <body>
@@ -721,11 +767,11 @@ function drawField(ctx, canvas) {
 function checkGoal(ball, canvas) {
     let goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT;
     // Check Left Goal (Blue's Net -> Red Scores)
-    if (ball.y > canvas.height/2 - goalHeight/2 && ball.y < canvas.height/2 + goalHeight/2 && ball.x - ball.radius <= 0) {
+    if (ball.y > canvas.height/2 - goalHeight / 2 && ball.y < canvas.height/2 + goalHeight / 2 && ball.x - ball.radius <= 0) {
         return 'right';
     }
     // Check Right Goal (Red's Net -> Blue Scores)
-    if (ball.y > canvas.height/2 - goalHeight/2 && ball.y < canvas.height/2 + goalHeight/2 && ball.x + ball.radius >= canvas.width) {
+    if (ball.y > canvas.height/2 - goalHeight / 2 && ball.y < canvas.height/2 + goalHeight / 2 && ball.x + ball.radius >= canvas.width) {
         return 'left';
     }
     return null;
@@ -799,10 +845,12 @@ class Car {
         } else {
             const data = remoteEntities[this.id];
             if (data) {
-                this.x += (data.x - this.x) * 0.3; this.y += (data.y - this.y) * 0.3;
+                // FIX: Smoother interpolation (0.1 instead of 0.3) for lower update rate
+                this.x += (data.x - this.x) * 0.1; 
+                this.y += (data.y - this.y) * 0.1;
                 let d = data.angle - this.angle;
                 while (d < -180) d += 360; while (d > 180) d -= 360;
-                this.angle += d * 0.3;
+                this.angle += d * 0.1;
                 this.boost = data.boost || 100; this.boosting = data.boosting || false;
             }
         }
