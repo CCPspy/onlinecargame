@@ -17,6 +17,10 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
 
+        // --- EXPOSE FIREBASE FUNCTIONS TO GLOBAL SCOPE FOR GAME LOOP ---
+        window.updateDoc = updateDoc;
+        window.serverTimestamp = serverTimestamp;
+
         window.netState = {
             db, auth, user: null, currentRoomId: null, isHost: false,
             unsubRoom: null, unsubPlayers: null, unsubEntities: null, unsubGameState: null,
@@ -62,34 +66,40 @@
 
         window.finalizeCreateRoom = async () => {
             const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-            await setDoc(doc(colRooms, roomId), {
-                ...window.hostConfig,
-                status: 'lobby', hostId: window.netState.user.uid, createdAt: serverTimestamp()
-            });
-            document.getElementById('lobby-code').innerText = roomId;
-            window.switchScreen('screen-lobby');
-            await joinRoomLogic(roomId, window.username, true);
-            return roomId;
+            try {
+                await setDoc(doc(colRooms, roomId), {
+                    ...window.hostConfig,
+                    status: 'lobby', hostId: window.netState.user.uid, createdAt: serverTimestamp()
+                });
+                document.getElementById('lobby-code').innerText = roomId;
+                window.switchScreen('screen-lobby');
+                await joinRoomLogic(roomId, window.username, true);
+                return roomId;
+            } catch(e) { console.error(e); alert("Error creating room"); }
         };
 
         window.joinRoom = async (code) => {
             const roomId = code.trim().toUpperCase();
-            const roomSnap = await getDoc(doc(colRooms, roomId));
-            if (!roomSnap.exists()) throw new Error("Room not found");
-            document.getElementById('lobby-code').innerText = roomId;
-            window.switchScreen('screen-lobby');
-            await joinRoomLogic(roomId, window.username, false);
-            return roomId;
+            try {
+                const roomSnap = await getDoc(doc(colRooms, roomId));
+                if (!roomSnap.exists()) throw new Error("Room not found");
+                document.getElementById('lobby-code').innerText = roomId;
+                window.switchScreen('screen-lobby');
+                await joinRoomLogic(roomId, window.username, false);
+                return roomId;
+            } catch(e) { alert(e.message); throw e; }
         };
 
         async function joinRoomLogic(roomId, username, isHost) {
             const uid = window.netState.user.uid;
             const docId = `${roomId}_${uid}`;
-            await setDoc(doc(colPlayers, docId), {
-                roomId: roomId, userId: uid, username: username, isHost: isHost,
-                isReady: false, slotIndex: -1, team: 'spectator', joinedAt: serverTimestamp()
-            });
-            subscribeToRoom(roomId);
+            try {
+                await setDoc(doc(colPlayers, docId), {
+                    roomId: roomId, userId: uid, username: username, isHost: isHost,
+                    isReady: false, slotIndex: -1, team: 'spectator', joinedAt: serverTimestamp()
+                });
+                subscribeToRoom(roomId);
+            } catch(e) { console.error(e); }
         }
 
         window.leaveRoom = async () => {
@@ -97,7 +107,7 @@
             if (!roomId) { window.resetToMenu(); return; }
             const uid = window.netState.user.uid;
             const pDoc = doc(colPlayers, `${roomId}_${uid}`);
-            // Clean up listeners
+            
             if(window.netState.unsubRoom) window.netState.unsubRoom();
             if(window.netState.unsubPlayers) window.netState.unsubPlayers();
             if(window.netState.unsubEntities) window.netState.unsubEntities();
@@ -121,36 +131,44 @@
             const uid = window.netState.user.uid;
             const p = window.netState.playerMap[uid];
             if(!p || p.slotIndex === -1) return;
-            await updateDoc(doc(colPlayers, `${window.netState.currentRoomId}_${uid}`), { isReady: !p.isReady });
+            try { await updateDoc(doc(colPlayers, `${window.netState.currentRoomId}_${uid}`), { isReady: !p.isReady }); } catch(e){}
         };
 
         window.claimSlot = async (idx) => {
             const uid = window.netState.user.uid;
             const team = idx % 2 === 0 ? 'left' : 'right';
-            await updateDoc(doc(colPlayers, `${window.netState.currentRoomId}_${uid}`), { slotIndex: idx, team: team, isReady: false });
+            try { await updateDoc(doc(colPlayers, `${window.netState.currentRoomId}_${uid}`), { slotIndex: idx, team: team, isReady: false }); } catch(e){}
         };
 
-        window.updateSettings = async (updateObj) => {
-            await updateDoc(doc(colRooms, window.netState.currentRoomId), updateObj);
-        };
-        
         window.startGame = async () => {
-            await updateDoc(doc(colRooms, window.netState.currentRoomId), { status: 'playing' });
+            try { await updateDoc(doc(colRooms, window.netState.currentRoomId), { status: 'playing' }); } catch(e){}
         };
 
         window.sendGameUpdate = async (myEntities, ballData, gameData) => {
             const now = Date.now();
             if (now - window.netState.lastUpdateSent < 50) return; 
             window.netState.lastUpdateSent = now;
+            
             const roomId = window.netState.currentRoomId;
             const uid = window.netState.user.uid;
+            if (!roomId || !uid) return;
+
             const batch = writeBatch(db);
             const entId = `${roomId}_${uid}`;
-            batch.set(doc(colEntities, entId), { roomId, userId: uid, data: myEntities, ts: serverTimestamp() });
+            
+            if (myEntities) {
+                batch.set(doc(colEntities, entId), { roomId, userId: uid, data: myEntities, ts: serverTimestamp() });
+            }
+            
             if (ballData || gameData) {
                 const update = { roomId };
                 if(ballData) update.ball = ballData;
-                if(gameData) { update.scores = gameData.scores; update.timer = gameData.timer; update.paused = gameData.paused; }
+                if(gameData) { 
+                    if(gameData.scores) update.scores = gameData.scores; 
+                    if(gameData.timer !== undefined) update.timer = gameData.timer; 
+                    if(gameData.paused !== undefined) update.paused = gameData.paused;
+                    if(gameData.winner) update.winner = gameData.winner;
+                }
                 batch.set(doc(colGameStates, roomId), update, { merge: true });
             }
             try { await batch.commit(); } catch(e) {}
@@ -163,8 +181,9 @@
                 const data = snap.data();
                 window.updateLobbyUI(data);
                 if (data.status === 'playing' && window.gameState !== 'playing') window.initGame(data);
-                if (data.status === 'finished') { alert("Game Over"); window.resetToMenu(); }
-            });
+                // We handle 'finished' via gamestate update now for better UI
+            }, (err) => console.log(err));
+
             const qPlayers = query(colPlayers, where('roomId', '==', roomId));
             window.netState.unsubPlayers = onSnapshot(qPlayers, (snap) => {
                 const list = [];
@@ -174,16 +193,18 @@
                 const me = list.find(p => p.id === window.netState.user.uid);
                 if(me) window.netState.isHost = me.isHost;
                 window.renderSlots(list);
-            });
+            }, (err) => console.log(err));
+
             const qEntities = query(colEntities, where('roomId', '==', roomId));
             window.netState.unsubEntities = onSnapshot(qEntities, (snap) => {
                 snap.forEach(d => {
                     if(d.data().userId !== window.netState.user.uid) window.handleRemoteEntityUpdate(d.data().data);
                 });
-            });
+            }, (err) => console.log(err));
+
             window.netState.unsubGameState = onSnapshot(doc(colGameStates, roomId), (snap) => {
                 if(snap.exists()) window.handleGameStateUpdate(snap.data());
-            });
+            }, (err) => console.log(err));
         }
     </script>
 
@@ -247,13 +268,6 @@
         .mode-card:hover { border-color: #fbbf24; color: #fbbf24; transform: scale(1.05); }
         .mode-card span { font-size: 0.8rem; font-weight: normal; opacity: 0.7; }
 
-        .option-btn {
-            padding: 15px 20px; background: #374151; border: 2px solid #4b5563; color: #9ca3af;
-            font-weight: bold; border-radius: 12px; cursor: pointer; transition: 0.2s; min-width: 120px; font-size: 1.1rem;
-        }
-        .option-btn:hover { border-color: #fbbf24; color: #fbbf24; }
-        .option-btn.active { background: #fbbf24; color: #1f2937; border-color: #fbbf24; transform: scale(1.05); }
-        
         #bottom-hud {
             position: absolute; bottom: 0; left: 0; width: 100%; height: 80px;
             background: linear-gradient(to top, #111827, transparent);
@@ -388,6 +402,25 @@
         </div>
     </div>
 
+    <!-- SCREEN: RESULT -->
+    <div id="screen-result" class="screen z-50 bg-gray-900">
+        <h1 id="result-title" class="text-8xl font-black italic tracking-tighter mb-2" style="text-shadow: 0 10px 30px rgba(0,0,0,0.5);">VICTORY</h1>
+        <div class="flex gap-10 mb-10">
+            <div class="flex flex-col items-center">
+                <div class="text-blue-500 font-bold text-sm mb-1">BLUE</div>
+                <div id="end-score-blue" class="text-6xl font-black text-white">0</div>
+            </div>
+            <div class="flex flex-col items-center justify-center">
+                <div class="text-gray-600 text-4xl font-black italic">-</div>
+            </div>
+            <div class="flex flex-col items-center">
+                <div class="text-red-500 font-bold text-sm mb-1">RED</div>
+                <div id="end-score-red" class="text-6xl font-black text-white">0</div>
+            </div>
+        </div>
+        <button class="btn btn-primary" onclick="window.leaveRoom()">BACK TO MENU</button>
+    </div>
+
     <!-- SCREEN: GAME -->
     <div id="screen-game" class="screen">
         <div id="goal-flash">
@@ -470,6 +503,7 @@ let localCar = null;
 let goalFlashTimer = 0;
 let gameTimer = 0; // Host-side timer
 let gameTimerFlashed = false; // For the 30s/halfway flash
+let lastBallHitTime = 0; // For client-side prediction trust window
 
 window.onload = () => {
     canvas.width = FIELD_CONSTANTS.CANVAS_WIDTH;
@@ -544,6 +578,7 @@ window.resetGameObjects = () => {
     document.getElementById('slots-red').innerHTML = '';
     document.getElementById('modal-exit').classList.add('hidden');
     document.getElementById('goal-flash').classList.remove('visible');
+    lastBallHitTime = 0;
 };
 
 // --- RENDERERS ---
@@ -814,18 +849,41 @@ class Ball {
         this.val = 1; // Multiplier (1, 2, or 3)
     }
     update(dt) {
-        if (window.netState.isHost) {
-            this.x += this.velX*dt*60; this.y += this.velY*dt*60;
-            this.velX *= 0.98; this.velY *= 0.98;
-            if (this.x<this.radius) { this.x=this.radius; this.velX*=-0.8; }
-            if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius) { this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; }
-            if (this.y<this.radius) { this.y=this.radius; this.velY*=-0.8; }
-            if (this.y>FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius) { this.y=FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius; this.velY*=-0.8; }
-        } else {
+        // --- ALWAYS RUN LOCAL PHYSICS TO AVOID JITTER ---
+        this.x += this.velX*dt*60; this.y += this.velY*dt*60;
+        this.velX *= 0.98; this.velY *= 0.98;
+        
+        // Bounces
+        if (this.x<this.radius) { this.x=this.radius; this.velX*=-0.8; }
+        if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius) { this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; }
+        if (this.y<this.radius) { this.y=this.radius; this.velY*=-0.8; }
+        if (this.y>FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius) { this.y=FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius; this.velY*=-0.8; }
+
+        // --- CLIENT SIDE PREDICTION RECONCILIATION ---
+        if (!window.netState.isHost) {
             const d = remoteEntities['ball'];
             if(d) { 
-                this.x+=(d.x-this.x)*0.3; this.y+=(d.y-this.y)*0.3; 
-                this.val = d.val || 1; // Sync value
+                // Check how far we are from server
+                const dist = Math.hypot(d.x - this.x, d.y - this.y);
+                const timeSinceHit = Date.now() - lastBallHitTime;
+
+                // TRUST WINDOW: If we just hit the ball (<500ms ago) AND we aren't wildly off (<200px),
+                // ignore the server position to let the hit play out visually.
+                // This prevents the "moving backwards" glitch.
+                if (timeSinceHit < 500 && dist < 200) {
+                    // Do nothing, trust local physics entirely
+                } else {
+                    // Otherwise, blend towards server
+                    if (dist > 250) { 
+                        // Hard snap if too far (teleport/lag spike)
+                        this.x = d.x; this.y = d.y; 
+                    } else {
+                        // Soft lerp
+                        this.x += (d.x - this.x) * 0.15; 
+                        this.y += (d.y - this.y) * 0.15;
+                    }
+                }
+                this.val = d.val || 1;
             }
         }
     }
@@ -855,6 +913,7 @@ window.initGame = (roomData) => {
     goalFlashTimer = 0;
     gameTimer = roomData.duration; // Initialize Host Timer
     gameTimerFlashed = false;
+    lastBallHitTime = 0;
     document.getElementById('goal-flash').classList.remove('visible');
     
     const padLocs = [{x: 200, y: 200}, {x: 800, y: 200}, {x: 200, y: 400}, {x: 800, y: 400}, {x: 500, y: 100}, {x: 500, y: 500}];
@@ -899,31 +958,53 @@ window.handleGameStateUpdate = (data) => {
         document.getElementById('score-left').innerText = data.scores.left; 
         document.getElementById('score-right').innerText = data.scores.right; 
     }
+    
+    // --- WINNER DISPLAY LOGIC ---
+    if (data.winner) {
+        const myUid = window.netState.user.uid;
+        const me = window.netState.playerMap[myUid];
+        const myTeam = me ? me.team : 'spectator';
+        const title = document.getElementById('result-title');
+        
+        document.getElementById('end-score-blue').innerText = score.left;
+        document.getElementById('end-score-red').innerText = score.right;
+        
+        if (data.winner === 'draw') {
+             title.innerText = "DRAW";
+             title.className = "text-8xl font-black italic tracking-tighter mb-2 text-white";
+        } else if (myTeam === 'spectator') {
+             title.innerText = data.winner.toUpperCase() + " WINS";
+             title.className = "text-8xl font-black italic tracking-tighter mb-2 text-white";
+        } else {
+             const won = (data.winner === myTeam);
+             title.innerText = won ? "YOU WIN" : "YOU LOSE";
+             // Text color matches YOUR team color, not necessarily the winner color
+             // If I am Blue and I Win -> Blue Text "YOU WIN"
+             // If I am Red and I Lose -> Red Text "YOU LOSE"
+             const colorClass = myTeam === 'left' ? 'text-blue-500' : 'text-red-500';
+             title.className = `text-8xl font-black italic tracking-tighter mb-2 ${colorClass}`;
+        }
+        switchScreen('screen-result');
+    }
+
     if (data.timer !== undefined) { 
         const tBox = document.getElementById('game-timer');
-        
-        // --- LOGIC FOR POINTS VS TIMED VISIBILITY ---
         if (roomSettings.type === 'points') {
-            tBox.classList.add('points'); // Hides it via CSS
+            tBox.classList.add('points');
             tBox.classList.remove('countdown');
         } else {
             tBox.classList.remove('points');
-            
-            // Handle red countdown for last 10 seconds
             if (data.timer <= 10 && data.timer > 0) {
                 tBox.classList.add('countdown');
-                tBox.innerText = Math.ceil(data.timer); // Just the number
+                tBox.innerText = Math.ceil(data.timer); 
             } else {
                 tBox.classList.remove('countdown');
                 const m = Math.floor(data.timer/60), s = Math.floor(data.timer%60); 
                 tBox.innerText = `${m}:${s<10?'0'+s:s}`;
             }
-
-            // Handle 30s or Half-time Flash
             const duration = roomSettings.duration || 120;
             const isHalf = Math.abs(data.timer - duration/2) < 0.5;
             const is30 = Math.abs(data.timer - 30) < 0.5;
-            
             if (isHalf || is30) {
                 if (!tBox.dataset.flashed) {
                     tBox.classList.add('glow-red');
@@ -955,7 +1036,15 @@ function loop() {
             gameTimer -= dt;
             if (gameTimer <= 0) {
                 gameTimer = 0;
-                updateDoc(doc(colRooms, window.netState.currentRoomId), { status: 'finished' });
+                // Determine winner
+                let winner = 'draw';
+                if (score.left > score.right) winner = 'left';
+                if (score.right > score.left) winner = 'right';
+                window.sendGameUpdate(null, null, { scores: score, timer: 0, winner: winner });
+                // USE THE EXPOSED WINDOW FUNCTION
+                if (window.updateDoc) {
+                    window.updateDoc(doc(window.netState.db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app', 'public', 'data', 'rooms', window.netState.currentRoomId), { status: 'finished' });
+                }
             }
         }
 
@@ -971,10 +1060,23 @@ function loop() {
                 if (dist < minDist) {
                     const angle = Math.atan2(c1.y - c2.y, c1.x - c2.x);
                     const overlap = minDist - dist;
-                    const bounceForce = 5; 
-                    const dx = Math.cos(angle) * overlap * 0.5, dy = Math.sin(angle) * overlap * 0.5;
-                    if (c1.ownerId === window.netState.user.uid) { c1.x += dx; c1.y += dy; c1.velX += Math.cos(angle) * bounceForce; c1.velY += Math.sin(angle) * bounceForce; }
-                    if (c2.ownerId === window.netState.user.uid) { c2.x -= dx; c2.y -= dy; c2.velX -= Math.cos(angle) * bounceForce; c2.velY -= Math.sin(angle) * bounceForce; }
+                    
+                    // PUSH THEM APART
+                    const pushX = Math.cos(angle) * overlap * 0.5;
+                    const pushY = Math.sin(angle) * overlap * 0.5;
+
+                    if (c1.ownerId === window.netState.user.uid) { 
+                        c1.x += pushX; c1.y += pushY; 
+                        // ADD A PHYSICAL IMPULSE (BOUNCE)
+                        c1.velX += Math.cos(angle) * 2; 
+                        c1.velY += Math.sin(angle) * 2;
+                    }
+                    if (c2.ownerId === window.netState.user.uid) { 
+                        c2.x -= pushX; c2.y -= pushY; 
+                        // ADD A PHYSICAL IMPULSE (BOUNCE)
+                        c2.velX -= Math.cos(angle) * 2; 
+                        c2.velY -= Math.sin(angle) * 2;
+                    }
                 }
             }
         }
@@ -988,7 +1090,13 @@ function loop() {
                     const angle = Math.atan2(dy, dx), overlap = (FIELD_CONSTANTS.BALL_RADIUS + 50/2) - dist;
                     c.x -= Math.cos(angle) * overlap; c.y -= Math.sin(angle) * overlap;
                     c.velX -= Math.cos(angle) * 5; c.velY -= Math.sin(angle) * 5;
-                    if (window.netState.isHost) { ball.velX += Math.cos(angle) * 15; ball.velY += Math.sin(angle) * 15; }
+                    
+                    // Ball physics - APPLIED LOCALLY FOR RESPONSIVENESS
+                    ball.velX += Math.cos(angle) * 15; 
+                    ball.velY += Math.sin(angle) * 15;
+                    
+                    // Record Hit Time (for lag compensation logic)
+                    lastBallHitTime = Date.now();
                 }
             }
         });
@@ -1005,31 +1113,39 @@ function loop() {
             window.sendGameUpdate(myUpdateData, ballData, window.netState.isHost ? { scores: score, timer: gameTimer, paused: isPaused } : null);
         }
         
-        // HOST LOGIC: Scoring using provided checkGoal
+        // HOST LOGIC: Scoring
         if (window.netState.isHost) {
             const scoringTeam = checkGoal(ball, canvas);
             if (scoringTeam) {
-                const points = ball.val; // 1, 2, or 3
+                const points = ball.val; 
                 if (scoringTeam === 'left') score.left += points;
                 if (scoringTeam === 'right') score.right += points;
                 
+                if (roomSettings.type === 'points' && (score.left >= roomSettings.scoreTarget || score.right >= roomSettings.scoreTarget)) {
+                    let winner = score.left >= roomSettings.scoreTarget ? 'left' : 'right';
+                    window.sendGameUpdate({}, null, { scores: score, timer: 0, winner: winner });
+                    if (window.updateDoc) {
+                         window.updateDoc(doc(window.netState.db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app', 'public', 'data', 'rooms', window.netState.currentRoomId), { status: 'finished' });
+                    }
+                    return;
+                }
+
                 // Reset
-                // Spawn randomly on the middle line (x=500), but varies in Y
                 ball.x = 500; 
-                ball.y = Math.max(50, Math.min(550, 300 + (Math.random() - 0.5) * 500)); 
+                // Random spawn Y: Range 150 to 450 (safe zone)
+                ball.y = 150 + Math.random() * 300;
                 ball.velX = 0; ball.velY = 0; 
 
-                // Determine next ball multiplier
                 const rand = Math.random();
-                if (rand < 0.05) ball.val = 3; // 5% chance for x3
-                else if (rand < 0.15) ball.val = 2; // 10% chance for x2 (0.05 to 0.15)
+                if (rand < 0.05) ball.val = 3; 
+                else if (rand < 0.15) ball.val = 2; 
                 else ball.val = 1;
 
                 cars.forEach(c => {
                     if(c.resetPos) { c.x = c.resetPos.x; c.y = c.resetPos.y; c.angle = c.resetPos.angle; c.velX = 0; c.velY = 0; c.boost = 100; }
                 });
                 document.getElementById('goal-flash').classList.add('visible');
-                goalFlashTimer = 2.0;
+                goalFlashTimer = 1.0; // REDUCED FLASH TIME
                 window.sendGameUpdate({}, {x:ball.x, y:ball.y, val:ball.val}, { scores: score, timer: gameTimer }); 
             }
         }
