@@ -3,260 +3,201 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Online Car Game</title>
+    <title>Online Car Game (P2P)</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Firebase SDK -->
-    <script type="module">
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, collection, doc, setDoc, getDoc, updateDoc, onSnapshot, deleteDoc, writeBatch, serverTimestamp, query, where } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+    <!-- PeerJS SDK for WebRTC Networking -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 
-        const firebaseConfig = {
-            apiKey: "AIzaSyBWnSCQgMq0YoU14UCU5eg7nWZKwKSHuxA",
-            authDomain: "onlinecargame-4fe6a.firebaseapp.com",
-            projectId: "onlinecargame-4fe6a",
-            storageBucket: "onlinecargame-4fe6a.firebasestorage.app",
-            messagingSenderId: "1077083880146",
-            appId: "1:1077083880146:web:3e4c72737920de9c6f0b0b",
-            measurementId: "G-P86BC73C8P"
-        };
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app';
-        const app = initializeApp(firebaseConfig);
-        const auth = getAuth(app);
-        const db = getFirestore(app);
-
-        // --- EXPOSE FIREBASE FUNCTIONS TO GLOBAL SCOPE FOR GAME LOOP ---
-        window.updateDoc = updateDoc;
-        window.serverTimestamp = serverTimestamp;
-        // --- FIX: Expose all needed functions ---
-        window.doc = doc;
-        window.writeBatch = writeBatch;
-        window.deleteDoc = deleteDoc;
-
-        window.netState = {
-            db, auth, user: null, currentRoomId: null, isHost: false,
-            unsubRoom: null, unsubPlayers: null, unsubEntities: null, unsubGameState: null,
-            lastUpdateSent: 0, playerMap: {}, connectedPlayersList: []
-        };
-
-        const statusEl = document.getElementById('connection-status');
-        const colRooms = collection(db, 'artifacts', appId, 'public', 'data', 'rooms');
-        const colPlayers = collection(db, 'artifacts', appId, 'public', 'data', 'players');
-        const colEntities = collection(db, 'artifacts', appId, 'public', 'data', 'entities');
-        const colGameStates = collection(db, 'artifacts', appId, 'public', 'data', 'gamestates');
-
-        const initAuth = async () => {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
-                }
-            } catch (e) {
-                console.error("Auth Error:", e);
-                statusEl.textContent = "Auth Failed";
-                statusEl.className = "text-red-500 font-bold text-sm";
-            }
-        };
+    <script>
+        // --- NETWORKING LOGIC (P2P) ---
         
-        onAuthStateChanged(auth, (user) => {
-            if (user) {
-                window.netState.user = user;
-                statusEl.textContent = "● Online";
-                statusEl.className = "text-green-400 font-bold text-sm";
-                document.getElementById('login-container').classList.remove('opacity-50', 'pointer-events-none');
-            } else {
-                statusEl.textContent = "○ Connecting...";
-                statusEl.className = "text-yellow-400 font-bold text-sm";
-                document.getElementById('login-container').classList.add('opacity-50', 'pointer-events-none');
-            }
-        });
-        initAuth();
-
-        // --- NETWORKING ---
-        window.hostConfig = { mode: '1v1', type: 'timed', duration: 120, scoreTarget: 5 };
-
-        window.finalizeCreateRoom = async () => {
-            const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-            try {
-                await setDoc(doc(colRooms, roomId), {
-                    ...window.hostConfig,
-                    status: 'lobby', hostId: window.netState.user.uid, createdAt: serverTimestamp()
-                });
-                document.getElementById('lobby-code').innerText = roomId;
-                window.switchScreen('screen-lobby');
-                await joinRoomLogic(roomId, window.username, true);
-                return roomId;
-            } catch(e) { console.error(e); alert("Error creating room"); }
+        // Global Network State
+        window.netState = {
+            peer: null,             // My Peer Instance
+            myId: null,             // My Peer ID
+            hostConn: null,         // Connection to Host (if I am guest)
+            clientConns: [],        // List of connections (if I am host)
+            isHost: false,
+            user: { username: "Player", uid: null },
+            roomId: null,
+            roomSettings: {},
+            players: [],            // List of all players (Synced from Host)
+            lastUpdateSent: 0
         };
 
-        window.joinRoom = async (code) => {
-            const roomId = code.trim().toUpperCase();
-            try {
-                const roomSnap = await getDoc(doc(colRooms, roomId));
-                if (!roomSnap.exists()) throw new Error("Room not found");
-                document.getElementById('lobby-code').innerText = roomId;
-                window.switchScreen('screen-lobby');
-                await joinRoomLogic(roomId, window.username, false);
-                return roomId;
-            } catch(e) { alert(e.message); throw e; }
-        };
+        // Initialize Peer (Called when creating or joining)
+        async function initPeer(customId = null) {
+            return new Promise((resolve, reject) => {
+                const opts = { debug: 1 }; 
+                if (window.netState.peer) window.netState.peer.destroy();
 
-        async function joinRoomLogic(roomId, username, isHost) {
-            const uid = window.netState.user.uid;
-            const docId = `${roomId}_${uid}`;
-            try {
-                await setDoc(doc(colPlayers, docId), {
-                    roomId: roomId, userId: uid, username: username, isHost: isHost,
-                    isReady: false, slotIndex: -1, team: 'spectator', joinedAt: serverTimestamp()
+                window.netState.peer = customId ? new Peer(customId, opts) : new Peer(opts);
+
+                window.netState.peer.on('open', (id) => {
+                    window.netState.myId = id;
+                    window.netState.user.uid = id; 
+                    updateStatus("Online", "text-green-400");
+                    resolve(id);
                 });
-                subscribeToRoom(roomId);
-            } catch(e) { console.error(e); }
+
+                window.netState.peer.on('error', (err) => {
+                    console.error("Peer Error:", err);
+                    if (err.type === 'unavailable-id') {
+                        window.finalizeCreateRoom().catch(e => alert("Could not generate room ID. Try again."));
+                        reject("ID Taken");
+                    } else {
+                        updateStatus("Error", "text-red-500");
+                        reject(err);
+                    }
+                });
+
+                window.netState.peer.on('connection', (conn) => {
+                    handleIncomingConnection(conn);
+                });
+            });
         }
 
-        // --- LEAVE GAME FIX ---
-        window.leaveRoom = async () => {
-            const roomId = window.netState.currentRoomId;
-            if (!roomId) { window.resetToMenu(); return; }
-            const uid = window.netState.user.uid;
+        // --- HOST LOGIC ---
+        function handleIncomingConnection(conn) {
+            conn.on('open', () => {
+                window.netState.clientConns.push(conn);
+                conn.on('data', (data) => handlePacket(data, conn.peer));
+                conn.on('close', () => handlePlayerDisconnect(conn.peer));
+                
+                // Send current full state
+                sendToClient(conn, { 
+                    type: 'LOBBY_STATE', 
+                    payload: { 
+                        settings: window.hostConfig, 
+                        players: window.netState.players,
+                        roomId: window.netState.roomId 
+                    } 
+                });
+            });
+        }
+
+        function broadcastToClients(type, payload) {
+            if (!window.netState.isHost) return;
+            const packet = { type, payload };
+            window.netState.clientConns.forEach(conn => {
+                if(conn.open) conn.send(packet);
+            });
+        }
+
+        function handlePlayerDisconnect(peerId) {
+            if (!window.netState.isHost) return;
+            window.netState.clientConns = window.netState.clientConns.filter(c => c.peer !== peerId);
+            window.netState.players = window.netState.players.filter(p => p.userId !== peerId);
+            delete remoteEntities[`${window.netState.roomId}_${peerId}`];
             
-            // Unsubscribe from listeners FIRST
-            if(window.netState.unsubRoom) window.netState.unsubRoom();
-            if(window.netState.unsubPlayers) window.netState.unsubPlayers();
-            if(window.netState.unsubEntities) window.netState.unsubEntities();
-            if(window.netState.unsubGameState) window.netState.unsubGameState();
+            broadcastToClients('LOBBY_STATE', {
+                settings: window.hostConfig,
+                players: window.netState.players,
+                roomId: window.netState.roomId
+            });
+            window.renderSlots(window.netState.players);
+        }
+
+        // --- CLIENT LOGIC ---
+        function connectToHost(hostId) {
+            const conn = window.netState.peer.connect(hostId, { reliable: true });
+            conn.on('open', () => {
+                window.netState.hostConn = conn;
+                window.netState.roomId = hostId;
+                updateStatus("Connected to Host", "text-blue-400");
+                sendToHost('JOIN_REQUEST', { username: window.netState.user.username, userId: window.netState.myId });
+                document.getElementById('lobby-code').innerText = hostId;
+                window.switchScreen('screen-lobby');
+            });
+            conn.on('data', (data) => handlePacket(data, 'HOST'));
+            conn.on('close', () => { alert("Host disconnected!"); window.leaveRoom(); });
+            conn.on('error', (err) => console.error("Conn Error", err));
+        }
+
+        function sendToHost(type, payload) {
+            if (window.netState.hostConn && window.netState.hostConn.open) {
+                window.netState.hostConn.send({ type, payload });
+            }
+        }
+
+        function sendToClient(conn, packet) {
+            if(conn && conn.open) conn.send(packet);
+        }
+
+        // --- SHARED PACKET HANDLER ---
+        function handlePacket(packet, senderId) {
+            const { type, payload } = packet;
+
+            if (type === 'JOIN_REQUEST') {
+                if (!window.netState.isHost) return;
+                const newPlayer = {
+                    roomId: window.netState.roomId,
+                    userId: payload.userId,
+                    username: payload.username,
+                    isHost: false, isReady: false, slotIndex: -1, team: 'spectator'
+                };
+                const idx = window.netState.players.findIndex(p => p.userId === payload.userId);
+                if (idx === -1) window.netState.players.push(newPlayer);
+                else window.netState.players[idx] = newPlayer; 
+
+                broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+                window.renderSlots(window.netState.players);
+            }
+
+            else if (type === 'LOBBY_STATE') {
+                window.netState.players = payload.players;
+                window.hostConfig = payload.settings; 
+                window.updateLobbyUI(payload.settings);
+                window.renderSlots(payload.players);
+                if (payload.settings.status === 'playing' && window.gameState !== 'playing') {
+                     window.initGame(payload.settings);
+                }
+            }
             
-            try { 
-                // If user is host, delete the room, gamestate, and all player/entity docs
+            else if (type === 'SLOT_UPDATE') {
+                if (!window.netState.isHost) return;
+                const p = window.netState.players.find(p => p.userId === senderId);
+                if (p) {
+                    if (payload.action === 'claim') { p.slotIndex = payload.index; p.team = payload.team; p.isReady = false; } 
+                    else if (payload.action === 'ready') { p.isReady = payload.state; }
+                    broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+                    window.renderSlots(window.netState.players);
+                }
+            }
+
+            else if (type === 'GAME_UPDATE') {
+                if (window.netState.isHost) return; 
+                window.handleGameStateUpdate(payload);
+            }
+
+            else if (type === 'ENTITY_UPDATE') {
                 if (window.netState.isHost) {
-                    const batch = window.writeBatch(db);
-                    
-                    // 1. Delete Room
-                    batch.delete(doc(colRooms, roomId));
-                    
-                    // 2. Delete GameState
-                    batch.delete(doc(colGameStates, roomId));
-                    
-                    // 3. Delete all players in the room
-                    Object.keys(window.netState.playerMap).forEach(playerId => {
-                        batch.delete(doc(colPlayers, `${roomId}_${playerId}`));
+                    Object.keys(payload).forEach(key => { remoteEntities[key] = payload[key]; });
+                    window.netState.clientConns.forEach(conn => {
+                        if (conn.peer !== senderId && conn.open) conn.send({ type: 'ENTITY_UPDATE', payload: payload });
                     });
-                    
-                    // 4. Delete all entity docs for those players
-                     Object.keys(window.netState.playerMap).forEach(playerId => {
-                        batch.delete(doc(colEntities, `${roomId}_${playerId}`));
-                    });
-                    
-                    await batch.commit();
                 } else {
-                    // Just delete this one player's doc
-                    await window.deleteDoc(doc(colPlayers, `${roomId}_${uid}`)); 
+                    window.handleRemoteEntityUpdate(payload);
                 }
-            } catch(e) { 
-                console.error("Error during leaveRoom cleanup:", e);
             }
-            
-            window.resetToMenu(); // This resets local state and UI
-        };
-
-        window.resetToMenu = () => {
-            window.netState.currentRoomId = null;
-            window.netState.isHost = false;
-            window.netState.playerMap = {};
-            window.netState.connectedPlayersList = [];
-            document.getElementById('app').classList.remove('in-game');
-            window.switchScreen('screen-start');
-            window.resetGameObjects();
-        };
-
-        window.toggleReady = async () => {
-            const uid = window.netState.user.uid;
-            const p = window.netState.playerMap[uid];
-            if(!p || p.slotIndex === -1) return;
-            try { await updateDoc(doc(colPlayers, `${window.netState.currentRoomId}_${uid}`), { isReady: !p.isReady }); } catch(e){}
-        };
-
-        window.claimSlot = async (idx) => {
-            const uid = window.netState.user.uid;
-            const team = idx % 2 === 0 ? 'left' : 'right';
-            try { await updateDoc(doc(colPlayers, `${window.netState.currentRoomId}_${uid}`), { slotIndex: idx, team: team, isReady: false }); } catch(e){}
-        };
-
-        window.startGame = async () => {
-            try { await updateDoc(doc(colRooms, window.netState.currentRoomId), { status: 'playing' }); } catch(e){}
-        };
-
-        window.sendGameUpdate = async (myEntities, ballData, gameData) => {
-            const now = Date.now();
-            if (now - window.netState.lastUpdateSent < 50) return; // Reverted to 50ms (20fps) from user's file
-            window.netState.lastUpdateSent = now;
-            
-            const roomId = window.netState.currentRoomId;
-            const uid = window.netState.user.uid;
-            if (!roomId || !uid) return;
-
-            const batch = writeBatch(db);
-            const entId = `${roomId}_${uid}`;
-            
-            if (myEntities) {
-                batch.set(doc(colEntities, entId), { roomId, userId: uid, data: myEntities, ts: serverTimestamp() });
-            }
-            
-            if (ballData || gameData) {
-                const update = { roomId };
-                if(ballData) update.ball = ballData;
-                if(gameData) { 
-                    if(gameData.scores) update.scores = gameData.scores; 
-                    if(gameData.timer !== undefined) update.timer = gameData.timer; 
-                    if(gameData.paused !== undefined) update.paused = gameData.paused;
-                    if(gameData.winner) update.winner = gameData.winner;
-                }
-                batch.set(doc(colGameStates, roomId), update, { merge: true });
-            }
-            try { await batch.commit(); } catch(e) {}
-        };
-
-        function subscribeToRoom(roomId) {
-            window.netState.currentRoomId = roomId;
-            window.netState.unsubRoom = onSnapshot(doc(colRooms, roomId), (snap) => {
-                // --- LEAVE GAME FIX: Check if room exists ---
-                if(!snap.exists()) { 
-                    // Use a small timeout to avoid alert loops
-                    setTimeout(() => {
-                        if (window.netState.currentRoomId) { // Only alert if we haven't already left
-                            // alert("Room closed"); // Removed alert
-                            window.leaveRoom(); // Call leaveRoom to clean up remaining local state
-                        }
-                    }, 100);
-                    return; 
-                }
-                const data = snap.data();
-                window.updateLobbyUI(data);
-                if (data.status === 'playing' && window.gameState !== 'playing') window.initGame(data);
-            }, (err) => console.log(err));
-
-            const qPlayers = query(colPlayers, where('roomId', '==', roomId));
-            window.netState.unsubPlayers = onSnapshot(qPlayers, (snap) => {
-                const list = [];
-                snap.forEach(d => list.push({...d.data(), id: d.data().userId}));
-                window.netState.playerMap = list.reduce((acc,p) => ({...acc, [p.id]:p}), {});
-                window.netState.connectedPlayersList = list.map(p => p.id).sort();
-                const me = list.find(p => p.id === window.netState.user.uid);
-                if(me) window.netState.isHost = me.isHost;
-                window.renderSlots(list);
-            }, (err) => console.log(err));
-
-            const qEntities = query(colEntities, where('roomId', '==', roomId));
-            window.netState.unsubEntities = onSnapshot(qEntities, (snap) => {
-                snap.forEach(d => {
-                    if(d.data().userId !== window.netState.user.uid) window.handleRemoteEntityUpdate(d.data().data);
-                });
-            }, (err) => console.log(err));
-
-            window.netState.unsubGameState = onSnapshot(doc(colGameStates, roomId), (snap) => {
-                if(snap.exists()) window.handleGameStateUpdate(snap.data());
-            }, (err) => console.log(err));
         }
+
+        function updateStatus(msg, classStr) {
+            const container = document.getElementById('status-container');
+            const el = document.getElementById('connection-status');
+            if (!msg) {
+                container.style.display = 'none';
+            } else {
+                container.style.display = 'block';
+                el.textContent = "● " + msg;
+                el.className = classStr + " font-bold text-sm";
+            }
+        }
+
+        window.addEventListener('beforeunload', function (e) {
+            if (window.netState.roomId) { e.preventDefault(); e.returnValue = ''; }
+        });
+
     </script>
 
     <style>
@@ -326,10 +267,17 @@
             padding: 10px 30px; pointer-events: none; z-index: 20;
         }
         .score-box { font-size: 2.5rem; font-weight: 900; text-shadow: 0 2px 8px rgba(0,0,0,0.8); display: flex; flex-direction: column; align-items: center; line-height: 1; }
+        
         .timer-box { font-family: monospace; font-size: 2rem; font-weight: bold; color: white; text-shadow: 0 2px 4px black; margin-bottom: 10px; transition: all 0.3s ease; }
-        .timer-box.points { display: none; } /* HIDDEN IN POINTS MODE */
-        .timer-box.glow-red { color: #ef4444; text-shadow: 0 0 20px #ef4444; transform: scale(1.5); }
-        .timer-box.countdown { color: #ef4444; font-size: 6rem; position: absolute; bottom: 200px; left: 50%; transform: translateX(-50%); text-shadow: 4px 4px 0 #000; }
+        .timer-box.hidden-mode { display: none !important; } /* Explicitly hidden */
+        .timer-box.glow-red { color: #ef4444; text-shadow: 0 0 20px #ef4444; transform: scale(1.3); }
+        /* FIX: Bigger countdown with light red border */
+        .timer-box.countdown { 
+            color: #ef4444; 
+            font-size: 8rem; /* Bigger */
+            text-shadow: 4px 4px 0 #000; 
+            -webkit-text-stroke: 3px #fca5a5; /* Light red border */
+        }
         
         .boost-container {
             width: 200px; height: 20px; background: #374151; border: 2px solid #4b5563;
@@ -338,9 +286,7 @@
         .boost-fill { height: 100%; background: linear-gradient(90deg, #f59e0b, #fbbf24); width: 100%; transition: width 0.1s linear; }
         .boost-text { position: absolute; top: 0; left: 0; width: 100%; text-align: center; font-size: 0.7rem; font-weight: bold; color: black; line-height: 18px; }
         
-        /* --- FIX: Hide goal flash text --- */
         #goal-flash { display: none !important; }
-
     </style>
 </head>
 <body>
@@ -348,17 +294,18 @@
 <div id="app">
     <!-- Status Bar -->
     <div class="absolute top-4 left-4 z-50 flex gap-4 items-center">
-        <div class="bg-gray-900/80 px-3 py-1 rounded-full backdrop-blur-sm border border-gray-700">
-            <span id="connection-status" class="font-mono tracking-wider text-xs">Initializing...</span>
+        <div id="status-container" class="bg-gray-900/80 px-3 py-1 rounded-full backdrop-blur-sm border border-gray-700" style="display: none;">
+            <span id="connection-status" class="font-mono tracking-wider text-xs text-yellow-500"></span>
         </div>
     </div>
 
     <!-- SCREEN: START -->
     <div id="screen-start" class="screen active text-center">
         <h1 class="text-7xl font-black text-yellow-400 mb-2 tracking-tighter italic" style="text-shadow: 4px 4px 0 #000;">ONLINE <span class="text-white">CAR GAME</span></h1>
-        <p class="text-gray-400 mb-10 tracking-widest text-sm font-bold uppercase">Made by Eric</p>
+        <!-- FIX: Changed Text -->
+        <p class="text-gray-400 mb-10 tracking-widest text-sm font-bold uppercase">MADE BY ERIC</p>
         
-        <div id="login-container" class="flex flex-col items-center w-full opacity-50 pointer-events-none transition-opacity duration-500">
+        <div id="login-container" class="flex flex-col items-center w-full transition-opacity duration-500">
             <div class="mb-2 w-full max-w-[400px] text-left text-gray-500 text-xs font-bold ml-2">NAME</div>
             <input type="text" id="inp-name" class="inp-lg mb-6" placeholder="ENTER NAME" maxlength="12">
             <div id="name-error" class="h-6 text-red-500 font-bold text-sm mb-4 opacity-0 transition-opacity">Name too short (3+ chars)</div>
@@ -366,7 +313,6 @@
             <div class="flex flex-col gap-4 w-full items-center">
                 <button class="btn btn-primary shadow-lg shadow-yellow-500/20" onclick="goToModeSelect()">CREATE ROOM</button>
                 <button class="btn btn-outline" onclick="goToJoin()">JOIN ROOM</button>
-                <button class="btn btn-secondary mt-4" style="width: auto; padding: 10px 20px; font-size: 0.8rem; border: 1px solid #4b5563;" onclick="window.location.href='https://ccpspy.github.io/cargame/'">PLAY OFFLINE MODE</button>
             </div>
         </div>
     </div>
@@ -416,12 +362,9 @@
         </div>
         
         <div class="text-center mb-4">
-            <div class="text-xs text-gray-500 font-bold tracking-widest mb-1">FREQUENCY CODE</div>
+            <div class="text-xs text-gray-500 font-bold tracking-widest mb-1">ROOM CODE (SHARE THIS)</div>
             <div id="lobby-code" class="text-6xl font-mono font-black text-white select-all tracking-widest" style="text-shadow: 0 0 20px rgba(255,255,255,0.2);">...</div>
         </div>
-
-        <!-- Host Settings Display for Guest -->
-        <div id="guest-msg" class="text-gray-500 text-sm mb-8 font-mono hidden bg-gray-900 px-4 py-2 rounded-full border border-gray-700">WAITING FOR HOST TO START...</div>
 
         <div id="lobby-info" class="flex gap-4 mb-6">
             <div class="bg-gray-800 px-4 py-2 rounded text-sm font-bold text-gray-400" id="info-mode">MODE: 1v1</div>
@@ -539,11 +482,10 @@ const ctx = canvas.getContext('2d');
 const keys = {};
 
 // Initialize Host Config
-window.hostConfig = { mode: '1v1', type: 'timed', duration: 120, scoreTarget: 5 };
+window.hostConfig = { mode: '1v1', type: 'timed', duration: 120, scoreTarget: 5, status: 'lobby' };
 
 // --- STATE ---
 let gameState = 'menu';
-let roomSettings = {};
 let cars = [];
 let ball = null;
 let boostPads = [];
@@ -551,14 +493,15 @@ let remoteEntities = {};
 let score = { left: 0, right: 0 };
 let lastTime = 0;
 let localCar = null;
-// let goalFlashTimer = 0; // REMOVED
 let gameTimer = 0; // Host-side timer
-let gameTimerFlashed = false; 
 let lastBallHitTime = 0; 
+let lastSyncSec = -1; // For 5-second sync check
 
 window.onload = () => {
     canvas.width = FIELD_CONSTANTS.CANVAS_WIDTH;
     canvas.height = FIELD_CONSTANTS.CANVAS_HEIGHT;
+    // Pre-initialize basic peer to be ready
+    updateStatus(""); // Start hidden
 };
 
 // --- UI FUNCTIONS ---
@@ -574,9 +517,29 @@ function validateName() {
     if(n.length < 3) { err.style.opacity = '1'; return null; }
     err.style.opacity = '0'; return n;
 }
-function goToModeSelect() { const name = validateName(); if(name) { window.username = name; switchScreen('screen-mode'); } }
-function goToJoin() { const name = validateName(); if(name) { window.username = name; switchScreen('screen-join'); } }
-function joinRoomAction() { const code = document.getElementById('inp-room-code').value; if(code.length < 1) return alert("Enter Code"); window.joinRoom(code).catch(e => { /* Swallowed alert */ }); }
+function goToModeSelect() { 
+    const name = validateName(); 
+    if(name) { 
+        window.netState.user.username = name; 
+        switchScreen('screen-mode'); 
+    } 
+}
+function goToJoin() { 
+    const name = validateName(); 
+    if(name) { 
+        window.netState.user.username = name; 
+        // We init peer anonymously (random ID)
+        updateStatus("Initializing Peer...", "text-yellow-400");
+        initPeer().then(() => {
+            switchScreen('screen-join');
+        });
+    } 
+}
+async function joinRoomAction() { 
+    const code = document.getElementById('inp-room-code').value.trim().toUpperCase(); 
+    if(code.length < 1) return alert("Enter Code"); 
+    connectToHost(code);
+}
 
 // Host Setup Flow
 function setHostMode(mode) { window.hostConfig.mode = mode; switchScreen('screen-type'); }
@@ -599,27 +562,69 @@ function setHostType(type) {
     });
     switchScreen('screen-limit');
 }
+
+window.finalizeCreateRoom = async () => {
+    if(window.hostConfig.type === 'timed') window.hostConfig.duration = window.tempDuration;
+    else window.hostConfig.scoreTarget = window.tempDuration;
+
+    updateStatus("Creating Room...", "text-yellow-400");
+    
+    // Generate 6-char ID
+    const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+    
+    try {
+        await initPeer(roomId); // Try to claim this ID on PeerServer
+        
+        window.netState.isHost = true;
+        window.netState.roomId = roomId;
+        window.hostConfig.hostId = roomId;
+        
+        // Add Host as first player
+        window.netState.players = [{
+            roomId: roomId,
+            userId: window.netState.myId,
+            username: window.netState.user.username,
+            isHost: true,
+            isReady: false,
+            slotIndex: -1,
+            team: 'spectator'
+        }];
+
+        document.getElementById('lobby-code').innerText = roomId;
+        window.updateLobbyUI(window.hostConfig);
+        window.renderSlots(window.netState.players);
+        window.switchScreen('screen-lobby');
+        
+    } catch(e) {
+        console.error("Room creation failed", e);
+        // Retry is handled in initPeer via recursion if ID taken
+    }
+};
+
 function finishHostSetup(val) {
-    if(window.hostConfig.type === 'timed') window.hostConfig.duration = val;
-    else window.hostConfig.scoreTarget = val;
+    window.tempDuration = val; // Store temp
     window.finalizeCreateRoom();
 }
 
-function lobbyAction() {
-    const uid = window.netState.user.uid;
-    const me = window.netState.playerMap[uid];
-    if(me && me.slotIndex !== -1) window.toggleReady();
-    // else alert("Click a slot (Blue or Red) to join the team first!"); // Removed alert
-}
+// --- LOBBY ACTIONS ---
 
-function tryExitGame() { document.getElementById('modal-exit').style.display = 'flex'; }
-function cancelExit() { document.getElementById('modal-exit').style.display = 'none'; }
-function pauseGame() {
-    if (!window.netState.isHost) return;
-    const modal = document.getElementById('modal-pause');
-    const isPaused = modal.style.display === 'flex';
-    window.sendGameUpdate(null, null, { paused: !isPaused });
-}
+window.leaveRoom = async () => {
+    // Disconnect P2P
+    if (window.netState.peer) {
+        window.netState.peer.destroy();
+        window.netState.peer = null;
+    }
+    window.netState.isHost = false;
+    window.netState.roomId = null;
+    window.netState.players = [];
+    window.netState.clientConns = [];
+    window.netState.hostConn = null;
+    
+    window.resetGameObjects();
+    document.getElementById('app').classList.remove('in-game');
+    switchScreen('screen-start');
+    updateStatus(""); // Clear status
+};
 
 window.resetGameObjects = () => {
     gameState = 'menu';
@@ -628,13 +633,68 @@ window.resetGameObjects = () => {
     document.getElementById('slots-blue').innerHTML = '';
     document.getElementById('slots-red').innerHTML = '';
     document.getElementById('modal-exit').style.display = 'none';
-    // document.getElementById('goal-flash').classList.remove('visible'); // REMOVED
     lastBallHitTime = 0;
 };
 
+function lobbyAction() {
+    const uid = window.netState.myId;
+    const me = window.netState.players.find(p => p.userId === uid);
+    if(me && me.slotIndex !== -1) window.toggleReady();
+}
+
+window.claimSlot = (idx) => {
+    const uid = window.netState.myId;
+    const team = idx % 2 === 0 ? 'left' : 'right';
+    
+    if (window.netState.isHost) {
+        // Host applies locally
+        const me = window.netState.players.find(p => p.userId === uid);
+        if(me) { me.slotIndex = idx; me.team = team; me.isReady = false; }
+        broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+        window.renderSlots(window.netState.players);
+    } else {
+        // Client sends request
+        sendToHost('SLOT_UPDATE', { action: 'claim', index: idx, team: team });
+    }
+};
+
+window.toggleReady = () => {
+    const uid = window.netState.myId;
+    const me = window.netState.players.find(p => p.userId === uid);
+    if (!me || me.slotIndex === -1) return;
+    
+    const newState = !me.isReady;
+    if (window.netState.isHost) {
+        me.isReady = newState;
+        broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+        window.renderSlots(window.netState.players);
+    } else {
+        sendToHost('SLOT_UPDATE', { action: 'ready', state: newState });
+    }
+};
+
+window.startGame = () => {
+    if (!window.netState.isHost) return;
+    window.hostConfig.status = 'playing';
+    broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+    window.initGame(window.hostConfig);
+};
+
+function tryExitGame() { document.getElementById('modal-exit').style.display = 'flex'; }
+function cancelExit() { document.getElementById('modal-exit').style.display = 'none'; }
+function pauseGame() {
+    if (!window.netState.isHost) return;
+    const modal = document.getElementById('modal-pause');
+    const isPaused = modal.style.display === 'flex';
+    // Toggle locally
+    if(isPaused) modal.style.display = 'none'; else modal.style.display = 'flex';
+    // In P2P, pause is part of GAME_UPDATE sent every frame, so it will sync automatically
+}
+
+
 // --- RENDERERS ---
 window.updateLobbyUI = (data) => {
-    roomSettings = data;
+    window.hostConfig = data;
     document.getElementById('info-mode').innerText = `MODE: ${data.mode}`;
     document.getElementById('info-type').innerText = `TYPE: ${data.type.toUpperCase()}`;
     document.getElementById('info-limit').innerText = `LIMIT: ${data.type==='timed'?(data.duration/60)+' MIN':data.scoreTarget + ' PTS'}`;
@@ -645,14 +705,12 @@ window.renderSlots = (players) => {
     const slotsRed = document.getElementById('slots-red');
     slotsBlue.innerHTML = ''; slotsRed.innerHTML = '';
     
-    // --- FIX: Ensure roomSettings is available ---
-    const mode = (roomSettings && roomSettings.mode) ? roomSettings.mode : '1v1';
-    
+    const mode = window.hostConfig.mode || '1v1';
     const count = mode === '2v2' ? 4 : (mode === '3v3' ? 6 : 2);
-    const uid = window.netState.user.uid;
-    const me = players.find(p => p.id === uid);
-    const btn = document.getElementById('btn-lobby-action');
+    const uid = window.netState.myId;
+    const me = players.find(p => p.userId === uid);
     
+    const btn = document.getElementById('btn-lobby-action');
     const startBtn = document.getElementById('btn-host-start');
     const hostWarning = document.getElementById('host-warning');
     
@@ -695,30 +753,25 @@ window.renderSlots = (players) => {
     }
 };
 
-// --- EXTRACTED MECHANICS ---
+// --- GAME MECHANICS ---
 
 function drawField(ctx, canvas) {
-    // Background
     ctx.fillStyle = FIELD_CONSTANTS.COLOR_FIELD;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // Goal Dims
     let goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT;
     let playerGoalTop = canvas.height / 2 - goalHeight / 2;
     let playerGoalBottom = canvas.height / 2 + goalHeight / 2;
 
-    // Goal Zones
     ctx.fillStyle = 'rgba(0, 102, 204, 0.2)';
     ctx.fillRect(0, playerGoalTop, 20, goalHeight);
     ctx.fillStyle = 'rgba(204, 0, 0, 0.2)';
     ctx.fillRect(canvas.width - 20, playerGoalTop, 20, goalHeight);
 
-    // Markings
     ctx.strokeStyle = "#dcdcdc"; ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(canvas.width / 2, 0); ctx.lineTo(canvas.width / 2, canvas.height); ctx.stroke();
     ctx.beginPath(); ctx.arc(canvas.width / 2, canvas.height / 2, 80, 0, Math.PI * 2); ctx.stroke();
     
-    // Goal Lines (Visual)
     ctx.strokeStyle = FIELD_CONSTANTS.COLOR_BLUE; ctx.lineWidth = FIELD_CONSTANTS.GOAL_LINE_WIDTH;
     ctx.beginPath(); ctx.moveTo(0, playerGoalTop); ctx.lineTo(0, playerGoalBottom); ctx.stroke();
     ctx.strokeStyle = FIELD_CONSTANTS.COLOR_RED;
@@ -726,13 +779,16 @@ function drawField(ctx, canvas) {
 }
 
 function checkGoal(ball, canvas) {
-    let goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT;
+    let goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT + 20; 
+    let goalTop = canvas.height/2 - goalHeight/2;
+    let goalBottom = canvas.height/2 + goalHeight/2;
+    
     // Check Left Goal (Blue's Net -> Red Scores)
-    if (ball.y > canvas.height/2 - goalHeight/2 && ball.y < canvas.height/2 + goalHeight/2 && ball.x - ball.radius <= 0) {
+    if (ball.y > goalTop && ball.y < goalBottom && ball.x - ball.radius <= 5) { 
         return 'right';
     }
     // Check Right Goal (Red's Net -> Blue Scores)
-    if (ball.y > canvas.height/2 - goalHeight/2 && ball.y < canvas.height/2 + goalHeight/2 && ball.x + ball.radius >= canvas.width) {
+    if (ball.y > goalTop && ball.y < goalBottom && ball.x + ball.radius >= canvas.width - 5) { 
         return 'left';
     }
     return null;
@@ -756,8 +812,10 @@ class Car {
         this.id = id; this.x = x; this.y = y; this.angle = angle;
         this.team = team; this.isLocal = isLocal; this.isAI = isAI; this.ownerId = ownerId;
         this.velX=0; this.velY=0; this.baseAcceleration=0.3; this.baseMaxSpeed=5.0;
-        // --- FIX: Turning Speed ---
-        this.baseRotationSpeed=3.8; // Lowered from 4.0 for comfort
+        
+        // FIX: Slower turning speed for better control (was 3.8)
+        this.baseRotationSpeed=3.0; 
+        
         this.baseSideFrictionFactor=0.05;
         this.boostPower=1.8; this.boost=100; 
         this.width=50; this.height=25;
@@ -767,17 +825,15 @@ class Car {
         this.difficulty=3;
     }
     update(dt) {
-        if (this.ownerId === window.netState.user.uid) {
+        if (this.isLocal) {
             let throttle = 0;
-            if (this.isAI) { this.handleAI(dt, ball, cars); throttle = this.aiThrottle; } 
-            else {
-                if (keys['KeyW'] || keys['ArrowUp']) throttle = 1;
-                else if (keys['KeyS'] || keys['ArrowDown']) throttle = -1;
-                if (keys['KeyA'] || keys['ArrowLeft']) this.angle = (this.angle + this.baseRotationSpeed) % 360;
-                if (keys['KeyD'] || keys['ArrowRight']) this.angle = (this.angle - this.baseRotationSpeed) % 360;
-                const shift = keys['ShiftLeft'] || keys['ShiftRight'];
-                this.boosting = !!(shift && this.boost > 0);
-            }
+            if (keys['KeyW'] || keys['ArrowUp']) throttle = 1;
+            else if (keys['KeyS'] || keys['ArrowDown']) throttle = -1;
+            if (keys['KeyA'] || keys['ArrowLeft']) this.angle = (this.angle + this.baseRotationSpeed) % 360;
+            if (keys['KeyD'] || keys['ArrowRight']) this.angle = (this.angle - this.baseRotationSpeed) % 360;
+            const shift = keys['ShiftLeft'] || keys['ShiftRight'];
+            this.boosting = !!(shift && this.boost > 0);
+            
             let rad = Math.PI * this.angle / 180;
             let fVel = this.velX*Math.cos(rad) - this.velY*Math.sin(rad);
             let sVel = this.velX*Math.sin(rad) + this.velY*Math.cos(rad);
@@ -791,7 +847,6 @@ class Car {
             if (speed > max) { let scale = max/speed; this.velX*=scale; this.velY*=scale; }
             this.x += this.velX * dt * 60; this.y += this.velY * dt * 60;
 
-            // --- WALLS: CARS BLOCKED FROM GOAL ---
             let mw = this.width/2, mh = this.height/2;
             if (this.x < mw) { this.x = mw; this.velX *= -0.5; }
             if (this.x > FIELD_CONSTANTS.CANVAS_WIDTH - mw) { this.x = FIELD_CONSTANTS.CANVAS_WIDTH - mw; this.velX *= -0.5; }
@@ -804,14 +859,40 @@ class Car {
                     pad.active = false; pad.cooldown = 5.0;
                 }
             });
-        } else {
+        } 
+        else if (this.isAI && window.netState.isHost) {
+            // Host runs AI Physics
+            this.handleAI(dt, ball, cars);
+            let rad = Math.PI * this.angle / 180;
+            let fVel = this.velX*Math.cos(rad) - this.velY*Math.sin(rad);
+            let sVel = this.velX*Math.sin(rad) + this.velY*Math.cos(rad);
+            let throttle = this.aiThrottle;
+            if (throttle !== 0) fVel += throttle * this.baseAcceleration;
+            if (this.boosting) { fVel += this.baseAcceleration * this.boostPower * (throttle || 1); this.boost = Math.max(0, this.boost - 1.0); }
+            fVel *= 0.96; sVel *= (1 - this.baseSideFrictionFactor);
+            this.velX = fVel * Math.cos(rad) + sVel * Math.sin(rad);
+            this.velY = -fVel * Math.sin(rad) + sVel * Math.cos(rad);
+            let speed = Math.hypot(this.velX, this.velY);
+            let max = this.baseMaxSpeed * (this.boosting ? this.boostPower : 1);
+            if (speed > max) { let scale = max/speed; this.velX*=scale; this.velY*=scale; }
+            this.x += this.velX * dt * 60; this.y += this.velY * dt * 60;
+
+            let mw = this.width/2, mh = this.height/2;
+            if (this.x < mw) { this.x = mw; this.velX *= -0.5; }
+            if (this.x > FIELD_CONSTANTS.CANVAS_WIDTH - mw) { this.x = FIELD_CONSTANTS.CANVAS_WIDTH - mw; this.velX *= -0.5; }
+            if (this.y < mh) { this.y = mh; this.velY *= -0.5; }
+            if (this.y > FIELD_CONSTANTS.CANVAS_HEIGHT - mh) { this.y = FIELD_CONSTANTS.CANVAS_HEIGHT - mh; this.velY *= -0.5; }
+        }
+        else {
+            // REMOTE PLAYER or AI (Client Side)
             const data = remoteEntities[this.id];
             if (data) {
-                this.x += (data.x - this.x) * 0.3; // Reverted to 0.3
-                this.y += (data.y - this.y) * 0.3; // Reverted to 0.3
+                // Lerp for smoothness
+                this.x += (data.x - this.x) * 0.5;
+                this.y += (data.y - this.y) * 0.5;
                 let d = data.angle - this.angle;
                 while (d < -180) d += 360; while (d > 180) d -= 360;
-                this.angle += d * 0.3; // Reverted to 0.3
+                this.angle += d * 0.5;
                 this.boost = data.boost || 100; this.boosting = data.boosting || false;
             }
         }
@@ -869,8 +950,6 @@ class Car {
     }
     draw() {
         ctx.save(); ctx.translate(this.x, this.y); 
-        
-        // Draw Car Body
         ctx.save();
         ctx.rotate(-this.angle * Math.PI / 180);
         ctx.fillStyle = this.color;
@@ -883,96 +962,60 @@ class Car {
             ctx.fillStyle = '#f59e0b'; ctx.beginPath(); ctx.moveTo(-28, 0); ctx.lineTo(-50 - Math.random()*10, -8); ctx.lineTo(-50 - Math.random()*10, 8); ctx.fill();
             ctx.fillStyle = '#fbbf24'; ctx.beginPath(); ctx.moveTo(-28, 0); ctx.lineTo(-40 - Math.random()*5, -4); ctx.lineTo(-40 - Math.random()*5, 4); ctx.fill();
         }
-        ctx.restore(); // End car rotation
-
-        // --- OVERHEAD BOOST BAR ---
-        // Draw above car, no rotation
+        ctx.restore();
         ctx.fillStyle = '#374151'; 
-        ctx.fillRect(-20, -35, 40, 6); // Background
-        // Fill color based on amount
+        ctx.fillRect(-20, -35, 40, 6);
         ctx.fillStyle = this.boost > 50 ? '#fbbf24' : (this.boost > 20 ? '#f59e0b' : '#ef4444');
-        ctx.fillRect(-19, -34, 38 * (this.boost/100), 4); // Fill
+        ctx.fillRect(-19, -34, 38 * (this.boost/100), 4);
 
         ctx.fillStyle = 'white'; ctx.font = '10px Inter'; ctx.textAlign = 'center';
-        const ownerName = window.netState.playerMap[this.ownerId]?.username;
-        ctx.fillText(this.isAI ? `AI` : (ownerName || 'P'), 0, -40);
-
-        ctx.restore(); // End translate
+        const p = window.netState.players.find(pl => pl.userId === this.ownerId);
+        ctx.fillText(this.isAI ? `AI` : (p ? p.username : 'P'), 0, -40);
+        ctx.restore();
     }
 }
 
 class Ball {
     constructor(x, y) { 
         this.x=x; this.y=y; this.velX=0; this.velY=0; this.radius=FIELD_CONSTANTS.BALL_RADIUS; 
-        this.val = 1; // Multiplier (1, 2, or 3)
+        this.val = 1;
     }
     
-    // --- GOAL PHYSICS FIX (From user's original file) ---
     update(dt) {
-        // --- ALWAYS RUN LOCAL PHYSICS TO AVOID JITTER ---
-        this.x += this.velX*dt*60; this.y += this.velY*dt*60;
-        this.velX *= 0.98; this.velY *= 0.98;
-        
-        const goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT;
-        const goalTop = FIELD_CONSTANTS.CANVAS_HEIGHT / 2 - goalHeight / 2;
-        const goalBottom = FIELD_CONSTANTS.CANVAS_HEIGHT / 2 + goalHeight / 2;
+        // HOST controls Ball Physics authoritative
+        if (window.netState.isHost) {
+            this.x += this.velX*dt*60; this.y += this.velY*dt*60;
+            this.velX *= 0.98; this.velY *= 0.98;
+            
+            const goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT;
+            const goalTop = canvas.height / 2 - goalHeight / 2; // FIX: Correct var usage
+            const goalBottom = canvas.height / 2 + goalHeight / 2;
+            // FIX: Allow ball to enter goal more easily
+            const inGoalY = this.y >= goalTop - 10 && this.y <= goalBottom + 10;
 
-        // Y Bounces (Top/Bottom Walls)
-        if (this.y<this.radius) { this.y=this.radius; this.velY*=-0.8; }
-        if (this.y>FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius) { this.y=FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius; this.velY*=-0.8; }
-
-        // X Bounces (Left/Right Walls)
-        // --- GOAL FIX: This logic correctly separates wall bounces from the goal area ---
-        const inGoalY = this.y >= goalTop && this.y <= goalBottom;
-
-        // Left wall
-        if (this.x<this.radius && !inGoalY) { 
-            this.x=this.radius; this.velX*=-0.8; 
-        }
-        // Right wall
-        if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius && !inGoalY) { 
-            this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; 
-        }
-        
-        // --- CLIENT SIDE PREDICTION RECONCILIATION ---
-        if (!window.netState.isHost) {
+            if (this.y<this.radius) { this.y=this.radius; this.velY*=-0.8; }
+            if (this.y>FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius) { this.y=FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius; this.velY*=-0.8; }
+            if (this.x<this.radius && !inGoalY) { this.x=this.radius; this.velX*=-0.8; }
+            if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius && !inGoalY) { this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; }
+        } else {
+            // Client lerps ball from host data
             const d = remoteEntities['ball'];
             if(d) { 
-                // Check how far we are from server
-                const dist = Math.hypot(d.x - this.x, d.y - this.y);
-                const timeSinceHit = Date.now() - lastBallHitTime;
-
-                // TRUST WINDOW: If we just hit the ball (<500ms ago) AND we aren't wildly off (<200px),
-                // ignore the server position to let the hit play out visually.
-                // This prevents the "moving backwards" glitch.
-                if (timeSinceHit < 500 && dist < 200) {
-                    // Do nothing, trust local physics entirely
-                } else {
-                    // Otherwise, blend towards server
-                    if (dist > 250) { 
-                        // Hard snap if too far (teleport/lag spike)
-                        this.x = d.x; this.y = d.y; 
-                    } else {
-                        // Soft lerp
-                        this.x += (d.x - this.x) * 0.15; // Reverted to 0.15 from user's file
-                        this.y += (d.y - this.y) * 0.15; // Reverted to 0.15 from user's file
-                    }
-                }
+                this.x += (d.x - this.x) * 0.3; 
+                this.y += (d.y - this.y) * 0.3;
                 this.val = d.val || 1;
             }
         }
     }
     
     draw() {
-        // Color based on multiplier
-        if(this.val === 3) ctx.fillStyle = '#ffd700'; // Gold
-        else if(this.val === 2) ctx.fillStyle = '#a855f7'; // Purple
-        else ctx.fillStyle = '#00fff4'; // Cyan
+        if(this.val === 3) ctx.fillStyle = '#ffd700';
+        else if(this.val === 2) ctx.fillStyle = '#a855f7';
+        else ctx.fillStyle = '#00fff4';
 
         ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2); ctx.fill();
         ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.beginPath(); ctx.arc(this.x-5, this.y-5, 6, 0, Math.PI*2); ctx.fill();
         
-        // Draw multiplier text if > 1
         if(this.val > 1) {
             ctx.fillStyle = '#000'; ctx.font = 'bold 14px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
             ctx.fillText(`x${this.val}`, this.x, this.y);
@@ -984,20 +1027,29 @@ window.initGame = (roomData) => {
     gameState = 'playing';
     document.getElementById('app').classList.add('in-game');
     switchScreen('screen-game');
-    roomSettings = roomData;
     cars = []; boostPads = []; score = {left:0, right:0};
-    // goalFlashTimer = 0; // REMOVED
-    gameTimer = roomData.duration; // Initialize Host Timer
-    gameTimerFlashed = false;
+    // FIX: Ensure score is visually reset immediately
+    document.getElementById('score-left').innerText = '0';
+    document.getElementById('score-right').innerText = '0';
+    
+    // FIX: Ensure timer is set
+    gameTimer = (roomData.type === 'timed' && roomData.duration) ? roomData.duration : 0; 
     lastBallHitTime = 0;
-    // document.getElementById('goal-flash').classList.remove('visible'); // REMOVED
+    lastSyncSec = -1;
+    
+    // FIX: Hide timer if Points Mode
+    const tBox = document.getElementById('game-timer');
+    if (roomData.type === 'points') {
+        tBox.classList.add('hidden-mode');
+    } else {
+        tBox.classList.remove('hidden-mode');
+    }
     
     const padLocs = [{x: 200, y: 200}, {x: 800, y: 200}, {x: 200, y: 400}, {x: 800, y: 400}, {x: 500, y: 100}, {x: 500, y: 500}];
     padLocs.forEach(p => boostPads.push(new BoostPad(p.x, p.y)));
 
     const count = roomData.mode === '2v2' ? 4 : (roomData.mode === '3v3' ? 6 : 2);
-    const players = Object.values(window.netState.playerMap);
-    const connIds = window.netState.connectedPlayersList;
+    const players = window.netState.players;
     let aiCars = [];
 
     for (let i = 0; i < count; i++) {
@@ -1006,20 +1058,29 @@ window.initGame = (roomData) => {
         const startX = isRed ? 900 : 100;
         const startY = 300 + (Math.floor(i/2) * 80 * (i%4==0?1:-1));
         const angle = isRed ? 180 : 0;
-        const id = p ? p.id : `ai_${i}`;
+        
+        let id;
+        if (p) id = p.userId;
+        else id = `ai_${i}`;
+
         const team = isRed ? 'right' : 'left';
-        let ownerId = p ? p.id : connIds[i % connIds.length];
-        const isMe = ownerId === window.netState.user.uid;
-        const newCar = new Car(id, startX, startY, angle, team, isMe && !!p, !p, ownerId);
+        
+        const isMe = p && p.userId === window.netState.myId;
+        const isAI = !p;
+        const ownerId = p ? p.userId : window.netState.roomId; 
+
+        const newCar = new Car(id, startX, startY, angle, team, isMe, isAI, ownerId);
         newCar.resetPos = {x: startX, y: startY, angle: angle};
         cars.push(newCar);
-        if(isMe && !!p) localCar = newCar;
-        if(!p) aiCars.push(newCar);
+        if(isMe) localCar = newCar;
+        if(isAI) aiCars.push(newCar);
     }
+    
     aiCars.sort((a, b) => a.id.localeCompare(b.id)).forEach((ai, idx) => {
         const roles = ["attacker", "defender", "mid", "attacker", "mid", "defender"];
         ai.role = roles[idx % roles.length];
     });
+    
     ball = new Ball(500, 300);
     lastTime = Date.now();
     loop();
@@ -1028,21 +1089,17 @@ window.initGame = (roomData) => {
 window.handleGameStateUpdate = (data) => {
     if (data.ball) {
         remoteEntities['ball'] = data.ball;
-        if(ball) ball.val = data.ball.val || 1;
     }
     if (data.scores) { 
         document.getElementById('score-left').innerText = data.scores.left; 
         document.getElementById('score-right').innerText = data.scores.right; 
-        score = data.scores; // --- FIX: Update local score state ---
+        score = data.scores;
     }
     
-    // --- WINNER DISPLAY LOGIC ---
     if (data.winner) {
-        // --- FIX: Check if game is already over ---
         if (gameState === 'finished') return; 
-
-        const myUid = window.netState.user.uid;
-        const me = window.netState.playerMap[myUid];
+        const myUid = window.netState.myId;
+        const me = window.netState.players.find(p => p.userId === myUid);
         const myTeam = me ? me.team : 'spectator';
         const title = document.getElementById('result-title');
         
@@ -1062,39 +1119,20 @@ window.handleGameStateUpdate = (data) => {
              title.className = `text-8xl font-black italic tracking-tighter mb-2 ${colorClass}`;
         }
         
-        // --- FIX: Set game state and switch screen for ALL players ---
         gameState = 'finished';
         switchScreen('screen-result');
     }
 
+    // FIX: Handle Timer Updates
     if (data.timer !== undefined) { 
-        const tBox = document.getElementById('game-timer');
-        if (roomSettings.type === 'points') {
-            tBox.classList.add('points');
-            tBox.classList.remove('countdown');
-        } else {
-            tBox.classList.remove('points');
-            if (data.timer <= 10 && data.timer > 0) {
-                tBox.classList.add('countdown');
-                tBox.innerText = Math.ceil(data.timer); 
-            } else {
-                tBox.classList.remove('countdown');
-                const m = Math.floor(data.timer/60), s = Math.floor(data.timer%60); 
-                tBox.innerText = `${m}:${s<10?'0'+s:s}`;
-            }
-            const duration = roomSettings.duration || 120;
-            const isHalf = Math.abs(data.timer - duration/2) < 0.5;
-            const is30 = Math.abs(data.timer - 30) < 0.5;
-            if (isHalf || is30) {
-                if (!tBox.dataset.flashed) {
-                    tBox.classList.add('glow-red');
-                    tBox.dataset.flashed = "true";
-                    setTimeout(() => tBox.classList.remove('glow-red'), 1000);
-                }
-            } else {
-                tBox.dataset.flashed = "";
-            }
+        // Sync Logic: Only overwrite local timer if forced (Goal or 5s Sync) or if drift is crazy
+        if (data.forceSync || Math.abs(gameTimer - data.timer) > 10) {
+            gameTimer = data.timer;
         }
+
+        // Helper handled in Loop for smoothness, but we update once here to prevent jump
+        const tBox = document.getElementById('game-timer');
+        // (Optional logic removed here as loop handles it now)
     }
     if (data.paused !== undefined) { 
         const m = document.getElementById('modal-pause'); 
@@ -1102,11 +1140,13 @@ window.handleGameStateUpdate = (data) => {
         else m.style.display = 'none'; 
     }
 };
-window.handleRemoteEntityUpdate = (data) => { Object.keys(data).forEach(k => remoteEntities[k] = data[k]); };
 
-// --- FIX: Made loop async to await final updates ---
-async function loop() {
-    // --- FIX: Moved rAF to top and added guard ---
+window.handleRemoteEntityUpdate = (data) => { 
+    Object.keys(data).forEach(k => remoteEntities[k] = data[k]); 
+};
+
+// --- GAME LOOP ---
+function loop() {
     requestAnimationFrame(loop);
     if (gameState !== 'playing') return;
 
@@ -1116,58 +1156,93 @@ async function loop() {
     drawField(ctx, canvas);
 
     const isPaused = document.getElementById('modal-pause').style.display === 'flex';
-    // --- GOAL TEXT REMOVED ---
-    // if (goalFlashTimer > 0) { ... } 
 
     if (!isPaused) {
-        // --- HOST TIMER LOGIC ---
-        if (window.netState.isHost && roomSettings.type === 'timed') {
+        // --- LOCAL TIMER UPDATE (For Everyone) ---
+        if (window.hostConfig.type === 'timed') {
             gameTimer -= dt;
-            if (gameTimer <= 0) {
-                gameTimer = 0;
-                // Determine winner
-                let winner = 'draw';
-                if (score.left > score.right) winner = 'left';
-                if (score.right > score.left) winner = 'right';
+            if (gameTimer < 0) gameTimer = 0;
+            
+            // FIX: FORCE UI UPDATE EVERY FRAME
+            const tBox = document.getElementById('game-timer');
+            const duration = window.hostConfig.duration || 120;
+            const isHalf = Math.abs(gameTimer - duration/2) < 0.5;
+            const is30 = Math.abs(gameTimer - 30) < 0.5;
+            
+            if (gameTimer <= 10 && gameTimer > 0) {
+                tBox.classList.add('countdown');
+                tBox.classList.remove('glow-red'); // Prioritize countdown style
+                tBox.innerText = Math.ceil(gameTimer); 
+            } else {
+                tBox.classList.remove('countdown');
+                const m = Math.floor(gameTimer/60), s = Math.floor(gameTimer%60); 
+                tBox.innerText = `${m}:${s<10?'0'+s:s}`;
                 
-                // --- END GAME FIX: Call UI update FIRST ---
-                window.handleGameStateUpdate({ winner: winner, scores: score });
-                gameState = 'finished'; // Set host state
-                
-                await window.sendGameUpdate(null, null, { scores: score, timer: 0, winner: winner });
-                if (window.updateDoc) {
-                    await window.updateDoc(doc(window.netState.db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app', 'public', 'data', 'rooms', window.netState.currentRoomId), { status: 'finished' });
+                // Flashing Logic
+                if (isHalf || is30) {
+                    if (!tBox.dataset.flashed) {
+                        tBox.classList.add('glow-red');
+                        tBox.dataset.flashed = "true";
+                        // Auto-remove flash after 1s
+                        setTimeout(() => tBox.classList.remove('glow-red'), 1000);
+                    }
+                } else {
+                    tBox.dataset.flashed = "";
                 }
-                return; // Stop processing frame
+            }
+        }
+
+        // --- HOST LOGIC: MASTER GAME STATE ---
+        if (window.netState.isHost) {
+            if (window.hostConfig.type === 'timed') {
+                if (gameTimer <= 0) {
+                    gameTimer = 0;
+                    let winner = 'draw';
+                    if (score.left > score.right) winner = 'left';
+                    if (score.right > score.left) winner = 'right';
+                    
+                    const endGamePayload = { winner: winner, scores: score, timer: 0, paused: false, forceSync: true };
+                    window.handleGameStateUpdate(endGamePayload);
+                    broadcastToClients('GAME_UPDATE', endGamePayload);
+                    return; 
+                }
             }
         }
 
         boostPads.forEach(p => { p.update(dt); p.draw(); });
-        ball.update(dt);
+        ball.update(dt); // Host runs phys, Client lerps
         
         const myUpdateData = {};
+        
+        // FIX: Improved collision physics
         for (let i = 0; i < cars.length; i++) {
-            for (let j = i + 1; j < cars.length; j++) {
+             for (let j = i + 1; j < cars.length; j++) {
                 const c1 = cars[i], c2 = cars[j];
                 const dist = Math.hypot(c1.x - c2.x, c1.y - c2.y);
                 const minDist = 45; 
                 if (dist < minDist) {
                     const angle = Math.atan2(c1.y - c2.y, c1.x - c2.x);
                     const overlap = minDist - dist;
-                    
-                    // PUSH THEM APART
                     const pushX = Math.cos(angle) * overlap * 0.5;
                     const pushY = Math.sin(angle) * overlap * 0.5;
 
-                    if (c1.ownerId === window.netState.user.uid) { 
+                    // FIX: Only move cars that WE control locally. 
+                    // Treat remote cars as solid walls. This prevents "jitter" where you push them and they snap back.
+                    
+                    if (c1.isLocal || (window.netState.isHost && c1.isAI)) {
                         c1.x += pushX; c1.y += pushY; 
-                        c1.velX += Math.cos(angle) * 2; 
-                        c1.velY += Math.sin(angle) * 2;
+                        // Bounce off the other car
+                        c1.velX += Math.cos(angle) * 3; c1.velY += Math.sin(angle) * 3;
+                        // Slow down slightly on impact
+                        c1.velX *= 0.8; c1.velY *= 0.8;
                     }
-                    if (c2.ownerId === window.netState.user.uid) { 
+                    
+                    if (c2.isLocal || (window.netState.isHost && c2.isAI)) {
                         c2.x -= pushX; c2.y -= pushY; 
-                        c2.velX -= Math.cos(angle) * 2; 
-                        c2.velY -= Math.sin(angle) * 2;
+                         // Bounce off the other car
+                        c2.velX -= Math.cos(angle) * 3; c2.velY -= Math.sin(angle) * 3;
+                         // Slow down slightly on impact
+                        c2.velX *= 0.8; c2.velY *= 0.8;
                     }
                 }
             }
@@ -1175,18 +1250,36 @@ async function loop() {
 
         cars.forEach(c => {
             c.update(dt); c.draw();
-            if (c.ownerId === window.netState.user.uid) {
-                myUpdateData[c.id] = { x: Math.round(c.x), y: Math.round(c.y), angle: Math.round(c.angle), boost: Math.round(c.boost), boosting: !!c.boosting };
+            
+            // HIT BALL LOGIC
+            if (c.isLocal || (window.netState.isHost && c.isAI)) {
+                
+                // Prepare data to send
+                if (c.isLocal) {
+                    myUpdateData[c.id] = { 
+                        x: Math.round(c.x), y: Math.round(c.y), 
+                        angle: Math.round(c.angle), boost: Math.round(c.boost), 
+                        boosting: !!c.boosting 
+                    };
+                } else if (c.isAI) {
+                     // Host sends AI data too
+                     myUpdateData[c.id] = { 
+                        x: Math.round(c.x), y: Math.round(c.y), 
+                        angle: Math.round(c.angle), boost: Math.round(c.boost), 
+                        boosting: !!c.boosting 
+                    };
+                }
+
+                // Ball Collision
                 const dx = ball.x - c.x, dy = ball.y - c.y, dist = Math.hypot(dx, dy);
                 if (dist < FIELD_CONSTANTS.BALL_RADIUS + 50/2) {
                     const angle = Math.atan2(dy, dx), overlap = (FIELD_CONSTANTS.BALL_RADIUS + 50/2) - dist;
                     c.x -= Math.cos(angle) * overlap; c.y -= Math.sin(angle) * overlap;
                     c.velX -= Math.cos(angle) * 5; c.velY -= Math.sin(angle) * 5;
                     
+                    // Modify ball locally (Host will authoritative override, Clients will predict)
                     ball.velX += Math.cos(angle) * 15; 
                     ball.velY += Math.sin(angle) * 15;
-                    
-                    lastBallHitTime = Date.now();
                 }
             }
         });
@@ -1197,13 +1290,44 @@ async function loop() {
             document.getElementById('boost-bar-container').style.display = 'block';
         } else { document.getElementById('boost-bar-container').style.display = 'none'; }
 
-        if (Object.keys(myUpdateData).length > 0) {
-            let ballData = null;
-            if (window.netState.isHost) ballData = { x: Math.round(ball.x), y: Math.round(ball.y), val: ball.val };
-            window.sendGameUpdate(myUpdateData, ballData, window.netState.isHost ? { scores: score, timer: gameTimer, paused: isPaused } : null);
+        // --- NETWORK SYNC ---
+        const nowMs = Date.now();
+        if (nowMs - window.netState.lastUpdateSent > 30) { // 30 FPS updates (Faster than Firebase!)
+            window.netState.lastUpdateSent = nowMs;
+            
+            // Clients send their Car
+            if (!window.netState.isHost && localCar) {
+                 sendToHost('ENTITY_UPDATE', myUpdateData);
+            }
+            
+            // Host sends EVERYTHING (AI Cars + Their Car + Ball + GameState)
+            if (window.netState.isHost) {
+                 // Check 5 second interval
+                 let isSyncFrame = false;
+                 const currentSec = Math.floor(gameTimer);
+                 if (currentSec % 5 === 0 && currentSec !== lastSyncSec) {
+                     isSyncFrame = true;
+                     lastSyncSec = currentSec;
+                 }
+
+                 const gameStatePayload = { 
+                     scores: score, 
+                     timer: gameTimer, 
+                     paused: isPaused,
+                     forceSync: isSyncFrame // Tell clients to snap time
+                 };
+
+                 // Add Ball to entities
+                 myUpdateData['ball'] = { x: Math.round(ball.x), y: Math.round(ball.y), val: ball.val };
+                 
+                 // Send Entity Updates (Car + AI + Ball)
+                 broadcastToClients('ENTITY_UPDATE', myUpdateData);
+                 // Send Game Logic (Timer + Scores)
+                 broadcastToClients('GAME_UPDATE', gameStatePayload);
+            }
         }
         
-        // HOST LOGIC: Scoring
+        // --- HOST: GOAL CHECKING ---
         if (window.netState.isHost) {
             const scoringTeam = checkGoal(ball, canvas);
             if (scoringTeam) {
@@ -1211,38 +1335,35 @@ async function loop() {
                 if (scoringTeam === 'left') score.left += points;
                 if (scoringTeam === 'right') score.right += points;
                 
-                // --- Reset Ball & Cars FIRST ---
+                // Reset
                 ball.x = 500; 
                 ball.y = 150 + Math.random() * 300;
                 ball.velX = 0; ball.velY = 0; 
-
                 cars.forEach(c => {
                     if(c.resetPos) { c.x = c.resetPos.x; c.y = c.resetPos.y; c.angle = c.resetPos.angle; c.velX = 0; c.velY = 0; c.boost = 100; }
                 });
 
-                // --- Now, check for win condition ---
-                if (roomSettings.type === 'points' && (score.left >= roomSettings.scoreTarget || score.right >= roomSettings.scoreTarget)) {
-                    let winner = score.left >= roomSettings.scoreTarget ? 'left' : 'right';
-                    
-                    // --- END GAME FIX: Call UI update FIRST ---
-                    window.handleGameStateUpdate({ winner: winner, scores: score });
-                    gameState = 'finished'; // Set host state
-                    
-                    await window.sendGameUpdate({}, {x:ball.x, y:ball.y, val:ball.val}, { scores: score, timer: 0, winner: winner }); 
-                    if (window.updateDoc) {
-                         await window.updateDoc(doc(window.netState.db, 'artifacts', typeof __app_id !== 'undefined' ? __app_id : 'default-app', 'public', 'data', 'rooms', window.netState.currentRoomId), { status: 'finished' });
-                    }
-                    return; // Stop processing frame
+                // UPDATE HOST UI IMMEDIATELY
+                window.handleGameStateUpdate({ scores: score });
+
+                // Win Check
+                if (window.hostConfig.type === 'points' && (score.left >= window.hostConfig.scoreTarget || score.right >= window.hostConfig.scoreTarget)) {
+                    let winner = score.left >= window.hostConfig.scoreTarget ? 'left' : 'right';
+                    const endGamePayload = { winner: winner, scores: score, timer: 0, paused: false, forceSync: true };
+                    window.handleGameStateUpdate(endGamePayload);
+                    broadcastToClients('GAME_UPDATE', endGamePayload);
+                    return; 
                 }
 
-                // --- If NOT a winning goal, set new ball value and send update ---
+                // Next Round Ball
                 const rand = Math.random();
                 if (rand < 0.05) ball.val = 3; 
                 else if (rand < 0.15) ball.val = 2; 
                 else ball.val = 1;
-
-                // --- GOAL TEXT REMOVED ---
-                window.sendGameUpdate({}, {x:ball.x, y:ball.y, val:ball.val}, { scores: score, timer: gameTimer }); 
+                
+                // Force sync immediately on goal - THIS ENSURES ALL PLAYERS SEE NEW SCORE INSTANTLY
+                broadcastToClients('GAME_UPDATE', { scores: score, timer: gameTimer, paused: isPaused, forceSync: true });
+                broadcastToClients('ENTITY_UPDATE', { 'ball': { x: ball.x, y: ball.y, val: ball.val } });
             }
         }
     }
