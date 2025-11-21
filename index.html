@@ -25,6 +25,9 @@
             lastUpdateSent: 0
         };
 
+        // Flag to prevent browser warning when we exit intentionally
+        window.isIntentionalExit = false;
+
         // Initialize Peer (Called when creating or joining)
         async function initPeer(customId = null) {
             return new Promise((resolve, reject) => {
@@ -110,7 +113,12 @@
                 window.switchScreen('screen-lobby');
             });
             conn.on('data', (data) => handlePacket(data, 'HOST'));
-            conn.on('close', () => { alert("Host disconnected!"); window.leaveRoom(); });
+            
+            // --- CHANGED: Show Modal instead of Alert ---
+            conn.on('close', () => { 
+                document.getElementById('modal-disconnected').style.display = 'flex';
+            });
+            
             conn.on('error', (err) => console.error("Conn Error", err));
         }
 
@@ -185,7 +193,6 @@
                 }
             }
             
-            // --- NEW: PHYSICS INTERACTION PACKETS (CLIENT -> HOST) ---
             else if (type === 'BALL_HIT') {
                 if (!window.netState.isHost) return;
                 // Host receives new velocity data from a client who hit the ball
@@ -194,7 +201,6 @@
                     ball.y = payload.y;
                     ball.velX = payload.velX;
                     ball.velY = payload.velY;
-                    // We don't broadcast immediately; loop will pick it up next tick
                 }
             }
 
@@ -205,7 +211,6 @@
                 if (boostPads[idx]) {
                     boostPads[idx].active = false;
                     boostPads[idx].cooldown = 5.0;
-                    // State will be synced via GAME_UPDATE padStates
                 }
             }
         }
@@ -222,8 +227,12 @@
             }
         }
 
+        // --- CHANGED: Smart Tab Warning ---
         window.addEventListener('beforeunload', function (e) {
-            if (window.netState.roomId) { e.preventDefault(); e.returnValue = ''; }
+            if (window.netState.roomId && !window.isIntentionalExit) { 
+                e.preventDefault(); 
+                e.returnValue = ''; 
+            }
         });
 
     </script>
@@ -487,6 +496,13 @@
                 <button class="btn btn-outline w-32" onclick="cancelExit()">CANCEL</button>
             </div>
         </div>
+
+        <!-- ADDED: Disconnect Modal (Replaces Alert) -->
+        <div id="modal-disconnected" class="absolute inset-0 bg-black/95 hidden z-50 flex flex-col items-center justify-center backdrop-blur-sm">
+            <h2 class="text-4xl text-red-500 font-black mb-4 italic">DISCONNECTED</h2>
+            <p class="text-gray-400 mb-8 text-center">The host has left the game.</p>
+            <button class="btn btn-primary w-48" onclick="window.leaveRoom()">RETURN TO MENU</button>
+        </div>
     </div>
 </div>
 
@@ -636,21 +652,11 @@ function finishHostSetup(val) {
 // --- LOBBY ACTIONS ---
 
 window.leaveRoom = async () => {
-    // Disconnect P2P
-    if (window.netState.peer) {
-        window.netState.peer.destroy();
-        window.netState.peer = null;
-    }
-    window.netState.isHost = false;
-    window.netState.roomId = null;
-    window.netState.players = [];
-    window.netState.clientConns = [];
-    window.netState.hostConn = null;
-    
-    window.resetGameObjects();
-    document.getElementById('app').classList.remove('in-game');
-    switchScreen('screen-start');
-    updateStatus(""); // Clear status
+    // --- CHANGED: FULL REFRESH ON LEAVE ---
+    // This is the "refreshing thingy" that fixes second-game bugs.
+    // By reloading the page, we ensure memory and peer connections are 100% clean.
+    window.isIntentionalExit = true; 
+    location.reload();
 };
 
 window.resetGameObjects = () => {
