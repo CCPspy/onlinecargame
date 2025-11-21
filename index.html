@@ -114,7 +114,7 @@
             });
             conn.on('data', (data) => handlePacket(data, 'HOST'));
             
-            // --- CHANGED: Show Modal instead of Alert ---
+            // Show Modal instead of Alert
             conn.on('close', () => { 
                 document.getElementById('modal-disconnected').style.display = 'flex';
             });
@@ -227,7 +227,7 @@
             }
         }
 
-        // --- CHANGED: Smart Tab Warning ---
+        // Smart Tab Warning
         window.addEventListener('beforeunload', function (e) {
             if (window.netState.roomId && !window.isIntentionalExit) { 
                 e.preventDefault(); 
@@ -545,6 +545,12 @@ window.onload = () => {
     canvas.height = FIELD_CONSTANTS.CANVAS_HEIGHT;
     // Pre-initialize basic peer to be ready
     updateStatus(""); // Start hidden
+
+    // --- NEW: Load Name from Local Storage ---
+    const savedName = localStorage.getItem('player_name');
+    if (savedName) {
+        document.getElementById('inp-name').value = savedName;
+    }
 };
 
 // --- UI FUNCTIONS ---
@@ -558,7 +564,10 @@ function validateName() {
     const n = document.getElementById('inp-name').value.trim();
     const err = document.getElementById('name-error');
     if(n.length < 3) { err.style.opacity = '1'; return null; }
-    err.style.opacity = '0'; return n;
+    err.style.opacity = '0'; 
+    // --- NEW: Save Name to Local Storage ---
+    localStorage.setItem('player_name', n);
+    return n;
 }
 function goToModeSelect() { 
     const name = validateName(); 
@@ -652,9 +661,7 @@ function finishHostSetup(val) {
 // --- LOBBY ACTIONS ---
 
 window.leaveRoom = async () => {
-    // --- CHANGED: FULL REFRESH ON LEAVE ---
-    // This is the "refreshing thingy" that fixes second-game bugs.
-    // By reloading the page, we ensure memory and peer connections are 100% clean.
+    // Full Refresh on Leave
     window.isIntentionalExit = true; 
     location.reload();
 };
