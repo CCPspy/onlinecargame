@@ -128,6 +128,7 @@
         function handlePacket(packet, senderId) {
             const { type, payload } = packet;
 
+            // --- CONNECTION / LOBBY ---
             if (type === 'JOIN_REQUEST') {
                 if (!window.netState.isHost) return;
                 const newPlayer = {
@@ -165,6 +166,7 @@
                 }
             }
 
+            // --- GAMEPLAY SYNC ---
             else if (type === 'GAME_UPDATE') {
                 if (window.netState.isHost) return; 
                 window.handleGameStateUpdate(payload);
@@ -172,12 +174,38 @@
 
             else if (type === 'ENTITY_UPDATE') {
                 if (window.netState.isHost) {
+                    // Host receives updates from a client about their car
                     Object.keys(payload).forEach(key => { remoteEntities[key] = payload[key]; });
+                    // Relay to others
                     window.netState.clientConns.forEach(conn => {
                         if (conn.peer !== senderId && conn.open) conn.send({ type: 'ENTITY_UPDATE', payload: payload });
                     });
                 } else {
                     window.handleRemoteEntityUpdate(payload);
+                }
+            }
+            
+            // --- NEW: PHYSICS INTERACTION PACKETS (CLIENT -> HOST) ---
+            else if (type === 'BALL_HIT') {
+                if (!window.netState.isHost) return;
+                // Host receives new velocity data from a client who hit the ball
+                if (ball) {
+                    ball.x = payload.x;
+                    ball.y = payload.y;
+                    ball.velX = payload.velX;
+                    ball.velY = payload.velY;
+                    // We don't broadcast immediately; loop will pick it up next tick
+                }
+            }
+
+            else if (type === 'BOOST_TAKEN') {
+                if (!window.netState.isHost) return;
+                // Client says "I took boost pad #X"
+                const idx = payload.index;
+                if (boostPads[idx]) {
+                    boostPads[idx].active = false;
+                    boostPads[idx].cooldown = 5.0;
+                    // State will be synced via GAME_UPDATE padStates
                 }
             }
         }
@@ -302,7 +330,6 @@
     <!-- SCREEN: START -->
     <div id="screen-start" class="screen active text-center">
         <h1 class="text-7xl font-black text-yellow-400 mb-2 tracking-tighter italic" style="text-shadow: 4px 4px 0 #000;">ONLINE <span class="text-white">CAR GAME</span></h1>
-        <!-- FIX: Changed Text -->
         <p class="text-gray-400 mb-10 tracking-widest text-sm font-bold uppercase">MADE BY ERIC</p>
         
         <div id="login-container" class="flex flex-col items-center w-full transition-opacity duration-500">
@@ -812,8 +839,6 @@ class Car {
         this.id = id; this.x = x; this.y = y; this.angle = angle;
         this.team = team; this.isLocal = isLocal; this.isAI = isAI; this.ownerId = ownerId;
         this.velX=0; this.velY=0; this.baseAcceleration=0.3; this.baseMaxSpeed=5.0;
-        
-        // FIX: Slower turning speed for better control (was 3.8)
         this.baseRotationSpeed=3.0; 
         
         this.baseSideFrictionFactor=0.05;
@@ -853,10 +878,15 @@ class Car {
             if (this.y < mh) { this.y = mh; this.velY *= -0.5; }
             if (this.y > FIELD_CONSTANTS.CANVAS_HEIGHT - mh) { this.y = FIELD_CONSTANTS.CANVAS_HEIGHT - mh; this.velY *= -0.5; }
 
-            boostPads.forEach(pad => {
+            // BOOST PAD LOGIC (CLIENT SIDE SEND)
+            boostPads.forEach((pad, index) => {
                 if (pad.active && Math.hypot(this.x-pad.x, this.y-pad.y) < this.width/2 + pad.radius) {
                     this.boost = Math.min(100, this.boost + 20);
                     pad.active = false; pad.cooldown = 5.0;
+                    // NOTIFY HOST
+                    if (!window.netState.isHost) {
+                        sendToHost('BOOST_TAKEN', { index: index });
+                    }
                 }
             });
         } 
@@ -998,11 +1028,19 @@ class Ball {
             if (this.x<this.radius && !inGoalY) { this.x=this.radius; this.velX*=-0.8; }
             if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius && !inGoalY) { this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; }
         } else {
-            // Client lerps ball from host data
+            // Client lerps ball from host data BUT uses velocity for prediction
             const d = remoteEntities['ball'];
             if(d) { 
                 this.x += (d.x - this.x) * 0.3; 
                 this.y += (d.y - this.y) * 0.3;
+                // Update velocity if provided for improved prediction
+                if (d.velX !== undefined) this.velX = d.velX;
+                if (d.velY !== undefined) this.velY = d.velY;
+                
+                // Simple client-side prediction
+                this.x += this.velX * dt * 0.5; // Weak prediction to smooth
+                this.y += this.velY * dt * 0.5;
+
                 this.val = d.val || 1;
             }
         }
@@ -1089,6 +1127,14 @@ window.initGame = (roomData) => {
 window.handleGameStateUpdate = (data) => {
     if (data.ball) {
         remoteEntities['ball'] = data.ball;
+    }
+    if (data.padStates) {
+        data.padStates.forEach((cooldown, i) => {
+            if(boostPads[i]) {
+                boostPads[i].cooldown = cooldown;
+                boostPads[i].active = (cooldown <= 0);
+            }
+        });
     }
     if (data.scores) { 
         document.getElementById('score-left').innerText = data.scores.left; 
@@ -1280,6 +1326,14 @@ function loop() {
                     // Modify ball locally (Host will authoritative override, Clients will predict)
                     ball.velX += Math.cos(angle) * 15; 
                     ball.velY += Math.sin(angle) * 15;
+
+                    // --- NEW: Send Physics Data to Host immediately ---
+                    if (!window.netState.isHost && c.isLocal) {
+                        sendToHost('BALL_HIT', { 
+                            x: ball.x, y: ball.y, 
+                            velX: ball.velX, velY: ball.velY 
+                        });
+                    }
                 }
             }
         });
@@ -1300,7 +1354,7 @@ function loop() {
                  sendToHost('ENTITY_UPDATE', myUpdateData);
             }
             
-            // Host sends EVERYTHING (AI Cars + Their Car + Ball + GameState)
+            // Host sends EVERYTHING (AI Cars + Their Car + Ball + GameState + Pads)
             if (window.netState.isHost) {
                  // Check 5 second interval
                  let isSyncFrame = false;
@@ -1314,15 +1368,20 @@ function loop() {
                      scores: score, 
                      timer: gameTimer, 
                      paused: isPaused,
-                     forceSync: isSyncFrame // Tell clients to snap time
+                     forceSync: isSyncFrame, // Tell clients to snap time
+                     padStates: boostPads.map(p => p.cooldown) // SYNC MAP DATA
                  };
 
                  // Add Ball to entities
-                 myUpdateData['ball'] = { x: Math.round(ball.x), y: Math.round(ball.y), val: ball.val };
+                 myUpdateData['ball'] = { 
+                     x: Math.round(ball.x), y: Math.round(ball.y), 
+                     velX: ball.velX, velY: ball.velY, // SYNC VELOCITY
+                     val: ball.val 
+                 };
                  
                  // Send Entity Updates (Car + AI + Ball)
                  broadcastToClients('ENTITY_UPDATE', myUpdateData);
-                 // Send Game Logic (Timer + Scores)
+                 // Send Game Logic (Timer + Scores + Map)
                  broadcastToClients('GAME_UPDATE', gameStatePayload);
             }
         }
@@ -1362,8 +1421,8 @@ function loop() {
                 else ball.val = 1;
                 
                 // Force sync immediately on goal - THIS ENSURES ALL PLAYERS SEE NEW SCORE INSTANTLY
-                broadcastToClients('GAME_UPDATE', { scores: score, timer: gameTimer, paused: isPaused, forceSync: true });
-                broadcastToClients('ENTITY_UPDATE', { 'ball': { x: ball.x, y: ball.y, val: ball.val } });
+                broadcastToClients('GAME_UPDATE', { scores: score, timer: gameTimer, paused: isPaused, forceSync: true, padStates: boostPads.map(p=>p.cooldown) });
+                broadcastToClients('ENTITY_UPDATE', { 'ball': { x: ball.x, y: ball.y, velX: 0, velY: 0, val: ball.val } });
             }
         }
     }
