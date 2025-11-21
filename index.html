@@ -596,8 +596,8 @@ window.finalizeCreateRoom = async () => {
 
     updateStatus("Creating Room...", "text-yellow-400");
     
-    // Generate 6-char ID
-    const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+    // Generate 6-char ID (Revised for safety)
+    const roomId = Math.random().toString(36).substring(2, 8).toUpperCase().padEnd(6, 'X');
     
     try {
         await initPeer(roomId); // Try to claim this ID on PeerServer
