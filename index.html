@@ -1,21 +1,16 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
-    <!-- Viewport settings for mobile controls -->
-    <meta name="viewport"
-        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Online Car Game (P2P)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- PeerJS SDK for WebRTC Networking -->
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 
     <script>
         // --- NETWORKING LOGIC (P2P) ---
-
+       
         // Global Network State
         window.netState = {
             peer: null,             // My Peer Instance
@@ -30,8 +25,15 @@
             lastUpdateSent: 0
         };
 
-        // Flag to prevent browser warning when we exit intentionally
-        window.isIntentionalExit = false;
+        // Visual & Control Settings
+        window.gameSettings = {
+            visuals: 'simple', // Default to Simple
+            rotSpeed: 5.0,     // UPDATED: Faster initial rotation
+            keybinds: {
+                up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', 
+                boost: 'ShiftLeft', boost_alt: 'ShiftRight' // UPDATED: Dual boost keys
+            }
+        };
 
         // Initialize Peer (Called when creating or joining)
         async function initPeer(customId = null) {
@@ -68,10 +70,19 @@
         // --- HOST LOGIC ---
         function handleIncomingConnection(conn) {
             conn.on('open', () => {
+                // Full Room Check
+                const mode = window.hostConfig.mode || '1v1';
+                const max = mode === '2v2' ? 4 : (mode === '3v3' ? 6 : 2);
+                if (window.netState.players.length >= max) {
+                    conn.send({ type: 'JOIN_REJECT', payload: { reason: 'Room Full' } });
+                    setTimeout(() => conn.close(), 500);
+                    return;
+                }
+
                 window.netState.clientConns.push(conn);
                 conn.on('data', (data) => handlePacket(data, conn.peer));
                 conn.on('close', () => handlePlayerDisconnect(conn.peer));
-
+               
                 // Send current full state
                 sendToClient(conn, {
                     type: 'LOBBY_STATE',
@@ -84,11 +95,11 @@
             });
         }
 
-        function broadcastToClients(type, payload, excludePeerId = null) {
+        function broadcastToClients(type, payload) {
             if (!window.netState.isHost) return;
             const packet = { type, payload };
             window.netState.clientConns.forEach(conn => {
-                if (conn.open && conn.peer !== excludePeerId) conn.send(packet);
+                if(conn.open) conn.send(packet);
             });
         }
 
@@ -96,11 +107,8 @@
             if (!window.netState.isHost) return;
             window.netState.clientConns = window.netState.clientConns.filter(c => c.peer !== peerId);
             window.netState.players = window.netState.players.filter(p => p.userId !== peerId);
-
-            // Remove car from game if playing
-            const carIndex = cars.findIndex(c => c.ownerId === peerId);
-            if (carIndex !== -1) cars.splice(carIndex, 1);
-
+            delete remoteEntities[`${window.netState.roomId}_${peerId}`];
+           
             broadcastToClients('LOBBY_STATE', {
                 settings: window.hostConfig,
                 players: window.netState.players,
@@ -116,17 +124,18 @@
                 window.netState.hostConn = conn;
                 window.netState.roomId = hostId;
                 updateStatus("Connected to Host", "text-blue-400");
-                sendToHost('JOIN_REQUEST', { username: window.netState.user.username, userId: window.netState.myId });
+                // UPDATED: Send visual setting on join
+                sendToHost('JOIN_REQUEST', { 
+                    username: window.netState.user.username, 
+                    userId: window.netState.myId,
+                    visualSetting: window.gameSettings.visuals
+                });
                 document.getElementById('lobby-code').innerText = hostId;
-                window.switchScreen('screen-lobby');
             });
             conn.on('data', (data) => handlePacket(data, 'HOST'));
-
             conn.on('close', () => {
                 document.getElementById('modal-disconnected').style.display = 'flex';
             });
-
-            conn.on('error', (err) => console.error("Conn Error", err));
         }
 
         function sendToHost(type, payload) {
@@ -136,21 +145,45 @@
         }
 
         function sendToClient(conn, packet) {
-            if (conn && conn.open) conn.send(packet);
+            if(conn && conn.open) conn.send(packet);
         }
 
         // --- SHARED PACKET HANDLER ---
         function handlePacket(packet, senderId) {
             const { type, payload } = packet;
 
+            if (type === 'JOIN_REJECT') {
+                // Use a custom message box instead of alert()
+                showCustomAlert("Cannot Join: " + payload.reason);
+                window.switchScreen('screen-start');
+                return;
+            }
+
             // --- CONNECTION / LOBBY ---
             if (type === 'JOIN_REQUEST') {
                 if (!window.netState.isHost) return;
+
+                // NEW: Duplicate Name Check
+                const normalizedNewName = payload.username.toUpperCase();
+                const nameExists = window.netState.players.some(p => p.username.toUpperCase() === normalizedNewName);
+                
+                if (nameExists) {
+                    const conn = window.netState.clientConns.find(c => c.peer === senderId);
+                    if (conn) {
+                        conn.send({ type: 'JOIN_REJECT', payload: { reason: 'Name Already Taken' } });
+                        // Don't close connection, just reject. The client-side alert will handle it.
+                    }
+                    return; // Stop processing this join request
+                }
+                // END NEW
+
                 const newPlayer = {
                     roomId: window.netState.roomId,
                     userId: payload.userId,
-                    username: payload.username,
-                    isHost: false, isReady: false, slotIndex: -1, team: 'spectator'
+                    username: normalizedNewName, // Use the uppercase version
+                    isHost: false, isReady: false, slotIndex: -1, team: 'spectator',
+                    stats: { goals: 0, hits: 0, saves: 0 },
+                    visualSetting: payload.visualSetting || 'simple' // UPDATED: Store visual setting
                 };
                 const idx = window.netState.players.findIndex(p => p.userId === payload.userId);
                 if (idx === -1) window.netState.players.push(newPlayer);
@@ -163,13 +196,24 @@
             else if (type === 'LOBBY_STATE') {
                 window.netState.players = payload.players;
                 window.hostConfig = payload.settings;
+                // --- BUG FIX: Was 'updateLOBBY_STATE' ---
                 window.updateLobbyUI(payload.settings);
+                // --- END BUG FIX ---
                 window.renderSlots(payload.players);
-                if (payload.settings.status === 'playing' && gameState !== 'playing') {
-                    window.initGame(payload.settings);
+                // Ensure Lobby Code is set (if joining late)
+                document.getElementById('lobby-code').innerText = payload.roomId;
+                
+                if (payload.settings.status === 'playing' && window.gameState !== 'playing') {
+                     window.initGame(payload.settings);
+                } else if (payload.settings.status === 'lobby' && window.gameState !== 'menu') {
+                    // Host requested return to lobby
+                    window.resetGameObjects();
+                    window.switchScreen('screen-lobby');
+                } else if (window.gameState === 'menu' && document.getElementById('screen-lobby').classList.contains('active') === false) {
+                     window.switchScreen('screen-lobby');
                 }
             }
-
+           
             else if (type === 'SLOT_UPDATE') {
                 if (!window.netState.isHost) return;
                 const p = window.netState.players.find(p => p.userId === senderId);
@@ -183,85 +227,47 @@
 
             // --- GAMEPLAY SYNC ---
             else if (type === 'GAME_UPDATE') {
-                // Client receives authoritative game state (scores, timer)
                 if (window.netState.isHost) return;
-                scoreLeft = payload.scores.left;
-                scoreRight = payload.scores.right;
-
-                if (payload.timer !== undefined) {
-                    if (payload.forceSync || Math.abs(gameTimer - payload.timer) > 1.5) {
-                        gameTimer = payload.timer;
-                    }
-                }
-
-                if (payload.winner) {
-                    handleGameEnd(payload.winner);
-                }
-
-                if (payload.paused !== undefined) {
-                    const m = document.getElementById('modal-pause');
-                    if (payload.paused) m.style.display = 'flex';
-                    else m.style.display = 'none';
-                }
-
-                updateUI(); // Update visuals
+                window.handleGameStateUpdate(payload);
             }
 
             else if (type === 'ENTITY_UPDATE') {
                 if (window.netState.isHost) {
-                    // Host receives updates from a client about their car
-                    Object.keys(payload).forEach(key => {
-                        const carToUpdate = cars.find(c => c.ownerId === key);
-                        if (carToUpdate) {
-                            carToUpdate.x = payload[key].x;
-                            carToUpdate.y = payload[key].y;
-                            carToUpdate.angle = payload[key].angle;
-                            carToUpdate.boost = payload[key].boost;
-                            carToUpdate.boosting = payload[key].boosting;
-                        }
+                    Object.keys(payload).forEach(key => { remoteEntities[key] = payload[key]; });
+                    window.netState.clientConns.forEach(conn => {
+                        if (conn.peer !== senderId && conn.open) conn.send({ type: 'ENTITY_UPDATE', payload: payload });
                     });
-                    // Relay to others
-                    broadcastToClients('ENTITY_UPDATE', payload, senderId);
                 } else {
-                    // Client receives updates from Host about *other* entities
-                    Object.keys(payload).forEach(key => {
-                        if (key === 'ball') {
-                            if (ball) {
-                                remoteBallData = payload[key];
-                            }
-                        }
-                        // Find the car by ownerId, and make sure it's NOT our local car
-                        else {
-                            const carToUpdate = cars.find(c => c.ownerId === key);
-                            if (carToUpdate && localCar && carToUpdate.ownerId !== localCar.ownerId) {
-                                carToUpdate.x = payload[key].x;
-                                carToUpdate.y = payload[key].y;
-                                carToUpdate.angle = payload[key].angle;
-                                carToUpdate.boost = payload[key].boost;
-                                carToUpdate.boosting = payload[key].boosting;
-                            }
-                        }
-                    });
+                    window.handleRemoteEntityUpdate(payload);
+                }
+            }
+           
+            else if (type === 'BALL_HIT') {
+                if (!window.netState.isHost) return;
+                if (ball) {
+                    ball.x = payload.x;
+                    ball.y = payload.y;
+                    ball.velX = payload.velX;
+                    ball.velY = payload.velY;
+                }
+                
+                // Process Stats (Saves/Hits)
+                const player = window.netState.players.find(p => p.userId === senderId);
+                if (player) {
+                    if (payload.isSave) {
+                        player.stats.saves = (player.stats.saves || 0) + 1;
+                    } else {
+                        player.stats.hits = (player.stats.hits || 0) + 1;
+                    }
                 }
             }
 
             else if (type === 'BOOST_TAKEN') {
                 if (!window.netState.isHost) return;
-                // Client says "I took boost pad #X"
                 const idx = payload.index;
-                if (boostPads[idx] && boostPads[idx].active) {
-                    boostPads[idx].consume(null); // Host consumes it
-                    // Broadcast this change
-                    broadcastToClients('PAD_CONSUMED', { index: idx });
-                }
-            }
-
-            else if (type === 'PAD_CONSUMED') {
-                // Client receives "Pad #X was taken"
-                if (window.netState.isHost) return;
-                const idx = payload.index;
-                if (boostPads[idx] && boostPads[idx].active) {
-                    boostPads[idx].consume(null);
+                if (boostPads[idx]) {
+                    boostPads[idx].active = false;
+                    boostPads[idx].cooldown = 5.0;
                 }
             }
         }
@@ -278,7 +284,6 @@
             }
         }
 
-        // Smart Tab Warning
         window.addEventListener('beforeunload', function (e) {
             if (window.netState.roomId && !window.isIntentionalExit) {
                 e.preventDefault();
@@ -289,2091 +294,1588 @@
     </script>
 
     <style>
-        /* Base styles */
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
-
         body {
-            background: #111827;
-            color: white;
-            font-family: 'Inter', sans-serif;
-            overflow: hidden;
-            margin: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            height: 100vh;
-            min-height: 100dvh;
-            padding: 0;
-            touch-action: none;
-            box-sizing: border-box;
+            background: #111827; color: white; font-family: 'Inter', sans-serif;
+            overflow: hidden; margin: 0; display: flex; align-items: center; justify-content: center; height: 100vh;
         }
-
         #app {
-            width: 90vw;
-            max-width: 1000px;
-            height: 85vh;
-            position: relative;
-            background: #1f2937;
-            border-radius: 16px;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
+            width: 95vw; max-width: 1100px;
+            height: 90vh;
+            position: relative; background: #1f2937; border-radius: 16px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); overflow: hidden; display: flex; flex-direction: column;
             transition: all 0.5s ease;
         }
-
+       
         #app.in-game {
-            /* Fullscreen game view */
-            width: 100vw;
-            height: 100vh;
-            min-height: 100dvh;
-            max-width: none;
-            max-height: none;
-            border-radius: 0;
-            padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
-            box-sizing: border-box;
-        }
-
-        /* Canvas Wrapper */
-        #canvas-wrapper {
-            position: relative;
-            width: 100%;
-            max-width: 1000px;
-            aspect-ratio: 1000 / 600;
+            max-width: 1400px;
+            width: 98vw;
             height: auto;
-            touch-action: none;
-            overflow: hidden;
-            border-radius: 0.75rem;
-            margin: auto;
-            /* Center the canvas wrapper */
+            aspect-ratio: 16/9;
+            max-height: 95vh;
         }
 
-        #app.in-game #screen-game {
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            /* Center canvas vertically */
+        canvas { display: block; width: 100%; height: 100%; image-rendering: -webkit-optimize-contrast; }
+       
+        .screen { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; background: #1f2937; z-index: 10; }
+        .screen.active { display: flex; }
+       
+        .btn { padding: 14px 28px; border-radius: 12px; font-weight: 900; text-transform: uppercase; transition: 0.2s; cursor: pointer; border: none; font-size: 1.1rem; width: 200px; }
+        .btn-primary { background: #fbbf24; color: #1f2937; }
+        .btn-primary:hover { background: #f59e0b; transform: translateY(-2px); }
+        .btn-outline { border: 3px solid #4b5563; color: #d1d5db; background: transparent; }
+        .btn-outline:hover { border-color: #fbbf24; color: #fbbf24; }
+        .btn-danger { background: #ef4444; color: white; }
+        .btn-blue { background: #3b82f6; color: white; }
+        .btn-blue:hover { background: #2563eb; transform: translateY(-2px); }
+        
+        /* Keybind Button */
+        .btn-bind {
+            background: #374151; border: 2px solid #4b5563; color: white;
+            padding: 8px 16px; border-radius: 8px; font-family: monospace; font-weight: bold;
+            cursor: pointer; min-width: 100px;
         }
-
-        canvas {
-            display: block;
-            width: 100%;
-            height: 100%;
-            image-rendering: -webkit-optimize-contrast;
-            border-radius: 0.75rem;
-            /* Rounded corners for canvas */
-        }
-
-        .screen {
-            position: absolute;
-            inset: 0;
-            display: none;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            background: #1f2937;
-            z-index: 10;
-        }
-
-        .screen.active {
-            display: flex;
-        }
-
-        /* UI Components */
-        .btn {
-            padding: 14px 28px;
-            border-radius: 12px;
-            font-weight: 900;
-            text-transform: uppercase;
-            transition: 0.2s;
-            cursor: pointer;
-            border: none;
-            font-size: 1.1rem;
-            width: 200px;
-        }
-
-        .btn-primary {
-            background: #fbbf24;
-            color: #1f2937;
-        }
-
-        .btn-primary:hover {
-            background: #f59e0b;
-            transform: translateY(-2px);
-        }
-
-        .btn-outline {
-            border: 3px solid #4b5563;
-            color: #d1d5db;
-            background: transparent;
-        }
-
-        .btn-outline:hover {
-            border-color: #fbbf24;
-            color: #fbbf24;
-        }
-
-        .btn-danger {
-            background: #ef4444;
-            color: white;
-        }
-
-        .btn-icon {
-            padding: 10px;
-            width: auto;
-            font-size: 1.2rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-        }
-
+        .btn-bind:hover { border-color: #9ca3af; }
+        .btn-bind.binding { border-color: #fbbf24; color: #fbbf24; animation: pulse 1s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+       
         .inp-lg {
-            background: #374151;
-            border: 3px solid #4b5563;
-            padding: 16px;
-            border-radius: 12px;
-            color: white;
-            text-align: center;
-            font-size: 1.5rem;
-            font-weight: bold;
-            width: 100%;
-            max-width: 400px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
+            background: #374151; border: 3px solid #4b5563; padding: 16px; border-radius: 12px;
+            color: white; text-align: center; font-size: 1.5rem; font-weight: bold; width: 100%; max-width: 400px;
+            text-transform: uppercase; letter-spacing: 1px;
         }
-
-        .inp-lg:focus {
-            outline: none;
-            border-color: #fbbf24;
-        }
+        .inp-lg:focus { outline: none; border-color: #fbbf24; }
 
         .slot {
-            width: 100%;
-            height: 80px;
-            border: 2px dashed #4b5563;
-            border-radius: 8px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 0 20px;
-            cursor: pointer;
-            transition: 0.2s;
-            position: relative;
-            background: rgba(0, 0, 0, 0.2);
+            width: 100%; height: 80px; border: 2px dashed #4b5563; border-radius: 8px;
+            display: flex; align-items: center; justify-content: space-between; padding: 0 20px;
+            cursor: pointer; transition: 0.2s; position: relative; background: rgba(0,0,0,0.2);
         }
-
-        .slot:hover {
-            border-color: #9ca3af;
-            background: rgba(255, 255, 255, 0.05);
-        }
-
-        .slot.filled {
-            border-style: solid;
-            cursor: default;
-        }
-
-        .slot.filled.blue {
-            border-color: #3b82f6;
-            background: linear-gradient(90deg, rgba(30, 58, 138, 0.8), transparent);
-        }
-
-        .slot.filled.red {
-            border-color: #ef4444;
-            background: linear-gradient(90deg, rgba(127, 29, 29, 0.8), transparent);
-        }
-
-        .slot.ai {
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            opacity: 0.5;
-        }
-
+        .slot:hover { border-color: #9ca3af; background: rgba(255,255,255,0.05); }
+        .slot.filled { border-style: solid; cursor: default; }
+        .slot.filled.blue { border-color: #3b82f6; background: linear-gradient(90deg, rgba(30,58,138,0.8), transparent); }
+        .slot.filled.red { border-color: #ef4444; background: linear-gradient(90deg, rgba(127,29,29,0.8), transparent); }
+        .slot.ai { border: 1px solid rgba(255,255,255,0.1); opacity: 0.5; }
+       
         .mode-card {
-            width: 120px;
-            height: 120px;
-            background: #374151;
-            border: 3px solid #4b5563;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            border-radius: 16px;
-            font-size: 1.5rem;
-            font-weight: 900;
-            cursor: pointer;
-            transition: 0.2s;
-            text-align: center;
-            flex-direction: column;
-            gap: 5px;
+            width: 120px; height: 120px; background: #374151; border: 3px solid #4b5563;
+            display: flex; align-items: center; justify-content: center; border-radius: 16px;
+            font-size: 1.5rem; font-weight: 900; cursor: pointer; transition: 0.2s; text-align: center; flex-direction: column; gap: 5px;
         }
-
-        .mode-card:hover {
-            border-color: #fbbf24;
-            color: #fbbf24;
-            transform: scale(1.05);
-        }
-
-        .mode-card span {
-            font-size: 0.8rem;
-            font-weight: normal;
-            opacity: 0.7;
-        }
+        .mode-card:hover { border-color: #fbbf24; color: #fbbf24; transform: scale(1.05); }
+        .mode-card span { font-size: 0.8rem; font-weight: normal; opacity: 0.7; }
 
         #bottom-hud {
-            /* Position relative to the #canvas-wrapper, not the app */
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            width: 100%;
-            height: 80px;
+            position: absolute; bottom: 0; left: 0; width: 100%; height: 80px;
             background: linear-gradient(to top, #111827, transparent);
-            display: flex;
-            align-items: flex-end;
-            justify-content: space-between;
-            padding: 10px 30px;
-            pointer-events: none;
-            z-index: 20;
-            border-bottom-left-radius: 0.75rem;
-            border-bottom-right-radius: 0.75rem;
+            display: flex; align-items: flex-end; justify-content: space-between;
+            padding: 10px 30px; pointer-events: none; z-index: 20;
         }
-
-        .score-box {
-            font-size: 2.5rem;
-            font-weight: 900;
-            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.8);
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            line-height: 1;
-        }
-
-        .timer-box {
-            font-family: monospace;
-            font-size: 2rem;
-            font-weight: bold;
-            color: white;
-            text-shadow: 0 2px 4px black;
-            margin-bottom: 10px;
-            transition: all 0.3s ease;
-        }
-
-        .timer-box.hidden-mode {
-            display: none !important;
-        }
-
-        /* Explicitly hidden */
-        .timer-box.glow-red {
-            color: #ef4444;
-            text-shadow: 0 0 20px #ef4444;
-            transform: scale(1.3);
-        }
-
-        .timer-box.countdown {
-            color: #ef4444;
-            font-size: 8rem;
-            text-shadow: 4px 4px 0 #000;
-            -webkit-text-stroke: 3px #fca5a5;
-        }
-
+        .score-box { font-size: 2.5rem; font-weight: 900; text-shadow: 0 2px 8px rgba(0,0,0,0.8); display: flex; flex-direction: column; align-items: center; line-height: 1; }
+       
+        .timer-box { font-family: monospace; font-size: 2rem; font-weight: bold; color: white; text-shadow: 0 2px 4px black; margin-bottom: 10px; transition: all 0.3s ease; }
+        .timer-box.hidden-mode { visibility: hidden; }
+        .timer-box.glow-red { color: #ef4444; text-shadow: 0 0 20px #ef4444; transform: scale(1.3); }
+        .timer-box.countdown { color: #ef4444; font-size: 8rem; text-shadow: 4px 4px 0 #000; -webkit-text-stroke: 3px #fca5a5; }
+       
         .boost-container {
-            width: 200px;
-            height: 20px;
-            background: #374151;
-            border: 2px solid #4b5563;
-            border-radius: 10px;
-            overflow: hidden;
-            margin-bottom: 15px;
-            position: relative;
+            width: 200px; height: 20px; background: #374151; border: 2px solid #4b5563;
+            border-radius: 10px; overflow: hidden; margin-bottom: 15px; position: relative;
         }
+        .boost-fill { height: 100%; background: linear-gradient(90deg, #f59e0b, #fbbf24); width: 100%; transition: width 0.1s linear; }
+        .boost-text { position: absolute; top: 0; left: 0; width: 100%; text-align: center; font-size: 0.7rem; font-weight: bold; color: black; line-height: 18px; }
+       
+        /* Scoreboard Styles */
+        .scoreboard-row { display: grid; grid-template-columns: 2fr 1fr 1fr; width: 100%; padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+        .scoreboard-header { font-weight: bold; color: #9ca3af; font-size: 0.8rem; text-transform: uppercase; }
+        .mvp-tag { background: #f59e0b; color: black; padding: 2px 6px; border-radius: 4px; font-weight: 900; font-size: 0.7rem; margin-left: 8px; }
 
-        .boost-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #f59e0b, #fbbf24);
-            width: 100%;
-            transition: width 0.1s linear;
-        }
-
-        .boost-text {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            text-align: center;
-            font-size: 0.7rem;
-            font-weight: bold;
-            color: black;
-            line-height: 18px;
-        }
-
-        /* Touch Controls CSS */
-        .touch-layer {
-            position: absolute;
-            inset: 0;
-            pointer-events: none;
-            z-index: 40;
-            display: none;
-            /* Hidden by default */
-        }
-
-        body.mobile-mode .touch-layer {
-            display: block;
-        }
-
-        /* Visible only in mobile mode */
-
-        .touch-control {
-            position: absolute;
-            pointer-events: auto;
-            background: rgba(255, 255, 255, 0.1);
-            border: 2px solid rgba(255, 255, 255, 0.3);
-            border-radius: 50%;
-            backdrop-filter: blur(2px);
-            touch-action: none;
-            display: flex;
-            justify-content: center;
+        /* Custom Alert Modal */
+        #custom-alert {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8);
+            display: none; /* Hidden by default */
             align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            backdrop-filter: blur(5px);
         }
-
-        .touch-control-area {
-            position: absolute;
-            pointer-events: auto;
-            touch-action: none;
-        }
-
-        .joystick-base {
-            width: 120px;
-            height: 120px;
-            pointer-events: none;
-            display: none;
-            /* Hidden until touched */
-            position: absolute;
-        }
-
-        .joystick-stick {
-            width: 50px;
-            height: 50px;
-            background: rgba(255, 255, 255, 0.5);
-            border-radius: 50%;
-            pointer-events: none;
-            transform: translate(0px, 0px);
-            transition: transform 0.05s ease-out;
-        }
-
-        .action-btn {
-            width: 90px;
-            height: 90px;
-            bottom: 30px;
-            right: 30px;
-            background: rgba(59, 130, 246, 0.3);
-            border-color: rgba(59, 130, 246, 0.5);
-            font-weight: 900;
-            color: rgba(255, 255, 255, 0.8);
-            font-size: 14px;
-        }
-
-        .action-btn:active {
-            background: rgba(59, 130, 246, 0.6);
-        }
-
-        @keyframes blink {
-            0% {
-                opacity: 1;
-            }
-
-            50% {
-                opacity: 0.3;
-            }
-
-            100% {
-                opacity: 1;
-            }
-        }
-
-        .blink-active {
-            animation: blink 1s infinite;
-        }
-
-        /* Settings Range Slider */
-        input[type=range] {
-            width: 100%;
-            max-width: 300px;
-            -webkit-appearance: none;
-            background: transparent;
-        }
-
-        input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            height: 20px;
-            width: 20px;
-            border-radius: 50%;
-            background: #fbbf24;
-            cursor: pointer;
-            margin-top: -8px;
-        }
-
-        input[type=range]::-webkit-slider-runnable-track {
-            width: 100%;
-            height: 4px;
-            cursor: pointer;
-            background: #4b5563;
-            border-radius: 2px;
-        }
-
-        .key-bind-btn {
-            background: #374151;
-            border: 2px solid #4b5563;
-            padding: 10px;
-            border-radius: 8px;
-            min-width: 100px;
+        #custom-alert-box {
+            background: #1f2937;
+            border: 1px solid #4b5563;
+            border-radius: 12px;
+            padding: 24px;
+            width: 90%;
+            max-width: 400px;
             text-align: center;
-            font-weight: bold;
-            cursor: pointer;
-            transition: 0.2s;
-            text-transform: uppercase;
-        }
-
-        .key-bind-btn:hover {
-            border-color: #fbbf24;
-            color: #fbbf24;
-        }
-
-        .key-bind-btn.listening {
-            background: #fbbf24;
-            color: black;
-            border-color: #fbbf24;
-            animation: blink 1s infinite;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
         }
     </style>
 </head>
+<body>
 
-<body class="bg-gray-900">
+<!-- Custom Alert Modal -->
+<div id="custom-alert">
+    <div id="custom-alert-box">
+        <h3 id="custom-alert-title" class="text-2xl font-bold text-yellow-400 mb-4">Alert</h3>
+        <p id="custom-alert-message" class="text-gray-300 mb-6">This is an alert message.</p>
+        <button class="btn btn-primary w-full" onclick="hideCustomAlert()">OK</button>
+    </div>
+</div>
 
-    <div id="app">
-        <!-- Status Bar -->
-        <div class="absolute top-4 left-4 z-50 flex gap-4 items-center">
-            <div id="status-container"
-                class="bg-gray-900/80 px-3 py-1 rounded-full backdrop-blur-sm border border-gray-700"
-                style="display: none;">
-                <span id="connection-status" class="font-mono tracking-wider text-xs text-yellow-500"></span>
-            </div>
+
+<div id="app">
+    <!-- Status Bar -->
+    <div class="absolute top-4 left-4 z-50 flex gap-4 items-center">
+        <div id="status-container" class="bg-gray-900/80 px-3 py-1 rounded-full backdrop-blur-sm border border-gray-700" style="display: none;">
+            <span id="connection-status" class="font-mono tracking-wider text-xs text-yellow-500"></span>
         </div>
+    </div>
 
-        <!-- Settings Button REMOVED from here -->
-
-        <!-- SCREEN: START -->
-        <div id="screen-start" class="screen active text-center">
-            <h1 class="text-7xl font-black text-yellow-400 mb-2 tracking-tighter italic"
-                style="text-shadow: 4px 4px 0 #000;">ONLINE <span class="text-white">CAR GAME</span></h1>
-            <p class="text-gray-400 mb-10 tracking-widest text-sm font-bold uppercase">MADE BY ERIC</p>
-
-            <div id="login-container" class="flex flex-col items-center w-full transition-opacity duration-500">
-                <div class="mb-2 w-full max-w-[400px] text-left text-gray-500 text-xs font-bold ml-2">NAME</div>
-                <input type="text" id="inp-name" class="inp-lg mb-6" placeholder="ENTER NAME" maxlength="12">
-                <div id="name-error" class="h-6 text-red-500 font-bold text-sm mb-4 opacity-0 transition-opacity">Name
-                    too short (3+ chars)</div>
-
-                <div class="flex flex-col gap-4 w-full items-center">
-                    <button class="btn btn-primary shadow-lg shadow-yellow-500/20" onclick="goToModeSelect()">CREATE
-                        ROOM</button>
-                    <button class="btn btn-outline" onclick="goToJoin()">JOIN ROOM</button>
-                    <button class="btn btn-outline" onclick="openSettings()">SETTINGS</button>
-                    <button
-                        class="btn btn-outline text-blue-400 border-blue-500 hover:text-blue-300 hover:border-blue-400"
-                        onclick="window.location.href='https://ccpspy.github.io/cargame'">BACK TO LOCAL</button>
-                </div>
+    <!-- SCREEN: START -->
+    <div id="screen-start" class="screen active text-center">
+        <div class="absolute inset-0 bg-gray-900 opacity-50 z-[-1]"></div>
+        <h1 class="text-7xl font-black text-yellow-400 mb-2 tracking-tighter italic" style="text-shadow: 4px 4px 0 #000;">ONLINE <span class="text-white">CAR GAME</span></h1>
+        <p class="text-gray-400 mb-8 tracking-widest text-sm font-bold uppercase">MADE BY ERIC</p>
+       
+        <div id="login-container" class="flex flex-col items-center w-full transition-opacity duration-500">
+            <div class="mb-2 w-full max-w-[400px] text-left text-gray-500 text-xs font-bold ml-2">NAME</div>
+            <!-- UPDATED: Saves name on input and forces uppercase, added try...catch -->
+            <input type="text" id="inp-name" class="inp-lg mb-6 shadow-xl" placeholder="ENTER NAME" maxlength="12" oninput="this.value = this.value.toUpperCase(); try { localStorage.setItem('player_name', this.value); } catch(e) { console.warn('Could not save name to localStorage.'); }">
+            <div id="name-error" class="h-4 text-red-500 font-bold text-sm mb-2 opacity-0 transition-opacity">Name too short (3+ chars)</div>
+           
+            <div class="flex gap-4 mb-4">
+                <button class="btn btn-primary shadow-lg shadow-yellow-500/20" onclick="goToModeSelect()">CREATE ROOM</button>
+                <button class="btn btn-outline bg-gray-800/50" onclick="goToJoin()">JOIN ROOM</button>
             </div>
-        </div>
-
-        <!-- SCREEN: SETTINGS -->
-        <div id="screen-settings" class="screen">
-            <h2 class="text-4xl font-black mb-8 italic text-white">SETTINGS</h2>
-
-            <div class="flex gap-10 w-full max-w-3xl px-8">
-                <!-- Left: Sensitivity -->
-                <div class="flex-1 bg-gray-800/50 p-6 rounded-xl border border-gray-700">
-                    <h3 class="text-xl font-bold text-yellow-400 mb-6">CONTROLS</h3>
-
-                    <div class="mb-8">
-                        <div class="flex justify-between mb-2">
-                            <span class="text-sm font-bold text-gray-400">ROTATION SPEED</span>
-                            <span id="sens-val" class="text-sm font-bold text-white">1.0</span>
-                        </div>
-                        <input type="range" id="inp-sensitivity" min="0.5" max="2.0" step="0.1" value="1.0"
-                            oninput="updateSensitivity(this.value)">
-
-                        <!-- Rotation Preview -->
-                        <div
-                            class="mt-4 flex flex-col items-center bg-gray-900/50 rounded-lg p-2 border border-gray-700">
-                            <span class="text-xs text-gray-500 font-bold mb-2">PREVIEW</span>
-                            <canvas id="preview-canvas" width="150" height="100" class="rounded"></canvas>
-                        </div>
-                    </div>
-
-                    <!-- Mobile Toggle REMOVED -->
-                </div>
-
-                <!-- Right: Keybinds -->
-                <div class="flex-1 bg-gray-800/50 p-6 rounded-xl border border-gray-700">
-                    <h3 class="text-xl font-bold text-yellow-400 mb-6">KEY BINDINGS</h3>
-                    <div class="flex flex-col gap-3">
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400 font-bold text-sm">FORWARD</span>
-                            <button class="key-bind-btn" id="bind-up" onclick="startRebind('up')">W</button>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400 font-bold text-sm">BACKWARD</span>
-                            <button class="key-bind-btn" id="bind-down" onclick="startRebind('down')">S</button>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400 font-bold text-sm">LEFT</span>
-                            <button class="key-bind-btn" id="bind-left" onclick="startRebind('left')">A</button>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400 font-bold text-sm">RIGHT</span>
-                            <button class="key-bind-btn" id="bind-right" onclick="startRebind('right')">D</button>
-                        </div>
-                        <div class="flex justify-between items-center">
-                            <span class="text-gray-400 font-bold text-sm">BOOST</span>
-                            <button class="key-bind-btn" id="bind-boost" onclick="startRebind('boost')">SHIFT</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="mt-8 flex gap-4">
-                <button class="btn btn-outline" onclick="closeSettings()">BACK</button>
-                <button class="btn btn-primary" onclick="resetSettings()">RESET DEFAULT</button>
-            </div>
-
-            <!-- Rebind Overlay -->
-            <div id="rebind-overlay"
-                class="absolute inset-0 bg-black/80 hidden items-center justify-center z-50 flex-col backdrop-blur-sm">
-                <h3 class="text-2xl font-bold text-white mb-2">PRESS ANY KEY</h3>
-                <p class="text-gray-400">Press ESC to cancel</p>
-            </div>
-        </div>
-
-        <!-- SCREEN: MODE SELECT -->
-        <div id="screen-mode" class="screen">
-            <h2 class="text-4xl font-black mb-10 italic text-white">SELECT TEAM SIZE</h2>
-            <div class="flex gap-6 mb-10">
-                <div class="mode-card" onclick="setHostMode('1v1')">1v1 <span>2 Players</span></div>
-                <div class="mode-card" onclick="setHostMode('2v2')">2v2 <span>4 Players</span></div>
-                <div class="mode-card" onclick="setHostMode('3v3')">3v3 <span>6 Players</span></div>
-            </div>
-            <button class="btn btn-outline" onclick="switchScreen('screen-start')">BACK</button>
-        </div>
-
-        <!-- SCREEN: TYPE SELECT -->
-        <div id="screen-type" class="screen">
-            <h2 class="text-4xl font-black mb-10 italic text-white">GAME TYPE</h2>
-            <div class="flex gap-6 mb-10">
-                <div class="mode-card" onclick="setHostType('timed')">TIMED <span>Race against clock</span></div>
-                <div class="mode-card" onclick="setHostType('points')">POINTS <span>First to score</span></div>
-            </div>
-            <button class="btn btn-outline" onclick="switchScreen('screen-mode')">BACK</button>
-        </div>
-
-        <!-- SCREEN: LIMIT SELECT -->
-        <div id="screen-limit" class="screen">
-            <h2 class="text-4xl font-black mb-10 italic text-white" id="limit-title">DURATION</h2>
-            <div class="flex flex-wrap gap-6 mb-10 justify-center" id="limit-buttons"></div>
-            <button class="btn btn-outline" onclick="switchScreen('screen-type')">BACK</button>
-        </div>
-
-        <!-- SCREEN: JOIN INPUT -->
-        <div id="screen-join" class="screen">
-            <h2 class="text-3xl font-black mb-6">JOIN FREQUENCY</h2>
-            <input type="text" id="inp-room-code" class="inp-lg mb-6" placeholder="ROOM CODE">
+            
             <div class="flex gap-4">
-                <button class="btn btn-outline" onclick="switchScreen('screen-start')">BACK</button>
-                <button class="btn btn-primary" onclick="joinRoomAction()">CONNECT</button>
-            </div>
-        </div>
-
-        <!-- SCREEN: LOBBY -->
-        <div id="screen-lobby" class="screen">
-            <div class="absolute top-4 left-4" style="top: 60px;">
-                <button
-                    class="bg-red-500/20 text-red-400 px-4 py-2 rounded-lg text-xs font-bold hover:bg-red-500/40 border border-red-500/30"
-                    onclick="window.leaveRoom()">EXIT LOBBY</button>
-            </div>
-
-            <div class="text-center mb-4">
-                <div class="text-xs text-gray-500 font-bold tracking-widest mb-1">ROOM CODE (SHARE THIS)</div>
-                <div id="lobby-code" class="text-6xl font-mono font-black text-white select-all tracking-widest"
-                    style="text-shadow: 0 0 20px rgba(255,255,255,0.2);">...</div>
-            </div>
-
-            <div id="lobby-info" class="flex gap-4 mb-6">
-                <div class="bg-gray-800 px-4 py-2 rounded text-sm font-bold text-gray-400" id="info-mode">MODE: 1v1
-                </div>
-                <div class="bg-gray-800 px-4 py-2 rounded text-sm font-bold text-gray-400" id="info-type">TYPE: TIMED
-                </div>
-                <div class="bg-gray-800 px-4 py-2 rounded text-sm font-bold text-gray-400" id="info-limit">LIMIT: 2 MIN
-                </div>
-            </div>
-
-            <!-- SLOTS -->
-            <div class="flex justify-between w-full px-8 mb-8 h-[300px]">
-                <div class="slot-col w-1/2 pr-2" id="col-blue">
-                    <div class="text-blue-400 font-black text-xl italic mb-2 text-center">BLUE TEAM</div>
-                    <div id="slots-blue" class="flex flex-col gap-3"></div>
-                </div>
-                <div class="flex flex-col justify-center items-center">
-                    <div class="h-full w-px bg-gray-700"></div>
-                    <div class="py-4 text-gray-600 font-black text-2xl italic">VS</div>
-                    <div class="h-full w-px bg-gray-700"></div>
-                </div>
-                <div class="slot-col w-1/2 pl-2" id="col-red">
-                    <div class="text-red-400 font-black text-xl italic mb-2 text-center">RED TEAM</div>
-                    <div id="slots-red" class="flex flex-col gap-3"></div>
-                </div>
-            </div>
-
-            <div class="flex flex-col items-center gap-3">
-                <button id="btn-lobby-action" class="btn shadow-xl" onclick="lobbyAction()">JOIN A TEAM</button>
-                <button id="btn-host-start"
-                    class="btn bg-green-600 hover:bg-green-500 text-white hidden shadow-lg shadow-green-500/20"
-                    onclick="window.startGame()">START MATCH</button>
-                <p id="host-warning" class="text-red-500 text-xs font-bold hidden">YOU MUST JOIN A TEAM TO START</p>
-            </div>
-        </div>
-
-        <!-- SCREEN: RESULT -->
-        <div id="screen-result" class="screen z-50 bg-gray-900">
-            <h1 id="result-title" class="text-8xl font-black italic tracking-tighter mb-2"
-                style="text-shadow: 0 10px 30px rgba(0,0,0,0.5);">VICTORY</h1>
-            <div class="flex gap-10 mb-10">
-                <div class="flex flex-col items-center">
-                    <div class="text-blue-500 font-bold text-sm mb-1">BLUE</div>
-                    <div id="end-score-blue" class="text-6xl font-black text-white">0</div>
-                </div>
-                <div class="flex flex-col items-center justify-center">
-                    <div class="text-gray-600 text-4xl font-black italic">-</div>
-                </div>
-                <div class="flex flex-col items-center">
-                    <div class="text-red-500 font-bold text-sm mb-1">RED</div>
-                    <div id="end-score-red" class="text-6xl font-black text-white">0</div>
-                </div>
-            </div>
-            <button class="btn btn-primary" onclick="window.leaveRoom()">BACK TO MENU</button>
-        </div>
-
-        <!-- SCREEN: GAME -->
-        <div id="screen-game" class="screen">
-            <!-- Exit button -->
-            <button
-                class="absolute top-4 right-4 z-20 bg-red-900/80 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-xs font-bold border border-red-500/50"
-                onclick="tryExitGame()">EXIT</button>
-
-            <!-- Canvas Wrapper -->
-            <div id="canvas-wrapper">
-                <canvas id="canvas"></canvas>
-
-                <!-- Bottom HUD (Now inside wrapper) -->
-                <div id="bottom-hud">
-                    <div class="score-box text-blue-400">
-                        <div class="text-xs text-blue-500/70 font-bold tracking-wider">BLUE</div>
-                        <div id="score-left">0</div>
-                    </div>
-
-                    <div class="flex flex-col items-center">
-                        <div id="game-timer" class="timer-box">00:00</div>
-                        <div id="boost-bar-container" class="boost-container">
-                            <div id="boost-fill" class="boost-fill"></div>
-                            <div class="boost-text">BOOST</div>
-                        </div>
-                    </div>
-
-                    <div class="score-box text-red-400">
-                        <div class="text-xs text-red-500/70 font-bold tracking-wider">RED</div>
-                        <div id="score-right">0</div>
-                    </div>
-                </div>
-
-                <!-- Mobile Touch Controls Layer -->
-                <div id="touch-controls" class="touch-layer">
-                    <!-- Vs Computer / Standard Layout -->
-                    <div id="single-player-controls" class="w-full h-full relative">
-                        <!-- Joystick touch area covers left 50% of screen -->
-                        <div id="joystick-area-left" class="touch-control-area"
-                            style="position: absolute; bottom: 0; left: 0; width: 50%; height: 100%;">
-                            <!-- Visual joystick base, hidden initially, positioned by JS -->
-                            <div id="joystick-left" class="touch-control joystick-base">
-                                <div class="joystick-stick"></div>
-                            </div>
-                        </div>
-                        <!-- Bigger boost button -->
-                        <div id="btn-boost" class="touch-control action-btn">BOOST</div>
-                    </div>
-                </div>
-
-            </div> <!-- End canvas-wrapper -->
-
-
-            <!-- Modals -->
-            <div id="modal-pause"
-                class="absolute inset-0 bg-black/80 hidden z-50 flex flex-col items-center justify-center backdrop-blur-sm">
-                <h2 class="text-5xl text-white font-black mb-10 italic">GAME PAUSED</h2>
-                <button class="btn btn-primary w-64 mb-6" onclick="resumeGame()">RESUME</button>
-            </div>
-
-            <div id="modal-exit"
-                class="absolute inset-0 bg-black/90 hidden z-50 flex flex-col items-center justify-center backdrop-blur-sm">
-                <h2 class="text-3xl text-white font-bold mb-4">LEAVE GAME?</h2>
-                <p class="text-gray-400 mb-8">You will disconnect from the room.</p>
-                <div class="flex gap-4">
-                    <button class="btn btn-danger w-32" onclick="window.leaveRoom()">LEAVE</button>
-                    <button class="btn btn-outline w-32" onclick="cancelExit()">CANCEL</button>
-                </div>
-            </div>
-
-            <div id="modal-disconnected"
-                class="absolute inset-0 bg-black/95 hidden z-50 flex flex-col items-center justify-center backdrop-blur-sm">
-                <h2 class="text-4xl text-red-500 font-black mb-4 italic">DISCONNECTED</h2>
-                <p class="text-gray-400 mb-8 text-center">The host has left the game.</p>
-                <button class="btn btn-primary w-48" onclick="window.leaveRoom()">RETURN TO MENU</button>
+                <button class="btn btn-outline border-gray-600 text-gray-400 hover:text-white text-sm py-3 w-40" onclick="goToSettings()">SETTINGS</button>
+                <button class="btn btn-outline border-gray-600 text-gray-400 hover:text-white text-sm py-3 w-40" onclick="window.location.href='https://ccpspy.github.io/cargame'">BACK TO LOCAL GAME</button>
             </div>
         </div>
     </div>
 
-    <script>
-        // --- Constants ---
-        const DEFAULT_WIDTH = 1000, DEFAULT_HEIGHT = 600;
-        const CAR_WIDTH = 50, CAR_HEIGHT = 25;
-        const BALL_RADIUS = 17;
-        const GOAL_HEIGHT = 170;
-        const GOAL_LINE_WIDTH = 7;
-        const PHYSICS_TICK_RATE = 60; // For delta time calculations
-        const COLOR_BLUE = '#0066cc';
-        const COLOR_RED = '#cc0000';
-        const COLOR_CYAN = '#00fff4';
-        const COLOR_FIELD = '#2b2f3d';
+    <!-- SCREEN: SETTINGS -->
+    <div id="screen-settings" class="screen text-center">
+        <div class="flex flex-row gap-8 w-full max-w-5xl h-[80%] items-start">
+            <!-- Left Col: Visuals & Rotation -->
+            <div class="flex-1 flex flex-col gap-6">
+                <h2 class="text-4xl font-black italic text-white text-left">SETTINGS</h2>
+                
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 w-full text-left">
+                    <h3 class="text-lg font-bold text-yellow-400 mb-4">CAR VISUALS</h3>
+                    <div class="flex gap-4">
+                        <button id="btn-vis-simple" class="btn flex-1 bg-gray-600" onclick="setVisuals('simple')">SIMPLE</button>
+                        <button id="btn-vis-cool" class="btn flex-1 btn-primary" onclick="setVisuals('cool')">COOL</button>
+                    </div>
+                </div>
 
-        // --- Mobile Mode State ---
-        let isMobileMode = false;
-        try {
-            const ua = navigator.userAgent || navigator.vendor || window.opera;
-            const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-            const isAndroid = /Android/.test(ua);
-            const isMobileSpecific = /Mobi|Tablet|iPad|iPhone|Android/i.test(ua);
-            isMobileMode = isIOS || isAndroid || isMobileSpecific;
-        } catch (e) {
-            isMobileMode = false;
+                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 w-full text-left">
+                    <h3 class="text-lg font-bold text-yellow-400 mb-2">STEERING SENSITIVITY</h3>
+                    <div class="flex items-center gap-4">
+                        <span class="text-gray-400 text-sm font-bold">SLOW</span>
+                        <!-- UPDATED: Range max increased to 8.0 -->
+                        <input type="range" min="1.5" max="8.0" step="0.1" id="inp-rot-speed" class="w-full accent-yellow-400 h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer" oninput="updateRotSpeed(this.value)">
+                        <span class="text-gray-400 text-sm font-bold">FAST</span>
+                    </div>
+                    <!-- UPDATED: Default value text changed to 5.0 -->
+                    <div class="text-center text-white font-mono mt-2" id="val-rot-speed">5.0</div>
+                </div>
+
+                <!-- TEST AREA -->
+                <div class="bg-gray-800 p-4 rounded-xl border border-gray-700 w-full flex-1 flex flex-col">
+                    <h3 class="text-xs font-bold text-gray-500 mb-2">TEST DRIVE (A / D)</h3>
+                    <canvas id="test-canvas" class="w-full flex-1 bg-gray-900 rounded border border-gray-700"></canvas>
+                </div>
+            </div>
+
+            <!-- Right Col: Keybinds -->
+            <div class="flex-1 bg-gray-800 p-6 rounded-xl border border-gray-700 h-full overflow-y-auto">
+                <h3 class="text-lg font-bold text-yellow-400 mb-6">CONTROLS</h3>
+                <div class="flex flex-col gap-4" id="keybind-list">
+                    <!-- Injected via JS -->
+                </div>
+                <div class="mt-8 pt-4 border-t border-gray-700 flex flex-col gap-4">
+                    <button class="btn w-full bg-gray-600 hover:bg-gray-500 text-white" onclick="resetSettings()">RESET TO DEFAULT</button>
+                    <button class="btn btn-primary w-full" onclick="switchScreen('screen-start')">SAVE & BACK</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- SCREEN: MODE SELECT -->
+    <div id="screen-mode" class="screen">
+        <h2 class="text-4xl font-black mb-10 italic text-white">SELECT TEAM SIZE</h2>
+        <div class="flex gap-6 mb-10">
+            <div class="mode-card" onclick="setHostMode('1v1')">1v1 <span>2 Players</span></div>
+            <div class="mode-card" onclick="setHostMode('2v2')">2v2 <span>4 Players</span></div>
+            <div class="mode-card" onclick="setHostMode('3v3')">3v3 <span>6 Players</span></div>
+        </div>
+        <button class="btn btn-outline" onclick="switchScreen('screen-start')">BACK</button>
+    </div>
+
+    <!-- SCREEN: TYPE SELECT -->
+    <div id="screen-type" class="screen">
+        <h2 class="text-4xl font-black mb-10 italic text-white">GAME TYPE</h2>
+        <div class="flex gap-6 mb-10">
+            <div class="mode-card" onclick="setHostType('timed')">TIMED <span>Race against clock</span></div>
+            <div class="mode-card" onclick="setHostType('points')">POINTS <span>First to score</span></div>
+        </div>
+        <button class="btn btn-outline" onclick="switchScreen('screen-mode')">BACK</button>
+    </div>
+
+    <!-- SCREEN: LIMIT SELECT -->
+    <div id="screen-limit" class="screen">
+        <h2 class="text-4xl font-black mb-10 italic text-white" id="limit-title">DURATION</h2>
+        <div class="flex flex-wrap gap-6 mb-10 justify-center" id="limit-buttons"></div>
+        <button class="btn btn-outline" onclick="switchScreen('screen-type')">BACK</button>
+    </div>
+
+    <!-- SCREEN: JOIN INPUT -->
+    <div id="screen-join" class="screen">
+        <h2 class="text-3xl font-black mb-6">JOIN FREQUENCY</h2>
+        <input type="text" id="inp-room-code" class="inp-lg mb-6" placeholder="ROOM CODE">
+        <div class="flex gap-4">
+            <button class="btn btn-outline" onclick="switchScreen('screen-start')">BACK</button>
+            <button class="btn btn-primary" onclick="joinRoomAction()">CONNECT</button>
+        </div>
+    </div>
+
+    <!-- SCREEN: LOBBY -->
+    <div id="screen-lobby" class="screen">
+        <div class="absolute top-4 left-4 flex gap-2" style="top: 60px;">
+            <button class="bg-red-500/20 text-red-400 px-4 py-2 rounded-lg text-xs font-bold hover:bg-red-500/40 border border-red-500/30" onclick="window.leaveRoom()">LEAVE ROOM</button>
+        </div>
+       
+        <div class="text-center mb-4">
+            <div class="text-xs text-gray-500 font-bold tracking-widest mb-1">ROOM CODE (SHARE THIS)</div>
+            <div id="lobby-code" class="text-6xl font-mono font-black text-white select-all tracking-widest" style="text-shadow: 0 0 20px rgba(255,255,255,0.2);">...</div>
+        </div>
+
+        <div id="lobby-info" class="flex gap-4 mb-6">
+            <div class="bg-gray-800 px-4 py-2 rounded text-sm font-bold text-gray-400" id="info-mode">MODE: 1v1</div>
+            <div class="bg-gray-800 px-4 py-2 rounded text-sm font-bold text-gray-400" id="info-type">TYPE: TIMED</div>
+            <div class="bg-gray-800 px-4 py-2 rounded text-sm font-bold text-gray-400" id="info-limit">LIMIT: 2 MIN</div>
+        </div>
+
+        <!-- SLOTS -->
+        <div class="flex justify-between w-full px-8 mb-8 h-[300px]">
+            <div class="slot-col w-1/2 pr-2" id="col-blue">
+                <div class="text-blue-400 font-black text-xl italic mb-2 text-center">BLUE TEAM</div>
+                <div id="slots-blue" class="flex flex-col gap-3"></div>
+            </div>
+            <div class="flex flex-col justify-center items-center">
+                <div class="h-full w-px bg-gray-700"></div>
+                <div class="py-4 text-gray-600 font-black text-2xl italic">VS</div>
+                <div class="h-full w-px bg-gray-700"></div>
+            </div>
+            <div class="slot-col w-1/2 pl-2" id="col-red">
+                <div class="text-red-400 font-black text-xl italic mb-2 text-center">RED TEAM</div>
+                <div id="slots-red" class="flex flex-col gap-3"></div>
+            </div>
+        </div>
+
+        <div class="flex flex-col items-center gap-3 w-full max-w-lg">
+            <button id="btn-lobby-action" class="btn shadow-xl" onclick="lobbyAction()">JOIN A TEAM</button>
+            <div class="flex gap-4 w-full">
+                 <button id="btn-randomise" class="btn btn-blue hidden w-full" onclick="window.randomiseTeams()">RANDOMISE TEAMS</button>
+                 <button id="btn-host-start" class="btn bg-green-600 hover:bg-green-500 text-white hidden shadow-lg shadow-green-500/20 w-full" onclick="window.startGame()">START MATCH</button>
+            </div>
+            <p id="host-warning" class="text-red-500 text-xs font-bold hidden">YOU MUST JOIN A TEAM TO START</p>
+        </div>
+    </div>
+
+    <!-- SCREEN: RESULT -->
+    <div id="screen-result" class="screen z-50 bg-gray-900">
+        <h1 id="result-title" class="text-6xl font-black italic tracking-tighter mb-4" style="text-shadow: 0 10px 30px rgba(0,0,0,0.5);">VICTORY</h1>
+       
+        <div class="flex gap-10 mb-6">
+            <div class="text-blue-500 font-black text-4xl" id="end-score-blue">0</div>
+            <div class="text-gray-600 font-black text-4xl">-</div>
+            <div class="text-red-500 font-black text-4xl" id="end-score-red">0</div>
+        </div>
+
+        <!-- Scoreboard Container -->
+        <div class="w-full max-w-2xl bg-gray-800 rounded-lg border border-gray-700 overflow-hidden mb-6 flex flex-col h-[300px]">
+            <div class="scoreboard-row bg-gray-700/50 scoreboard-header">
+                <div>PLAYER</div>
+                <div class="text-center">GOALS</div>
+                <div class="text-right">SAVES</div>
+            </div>
+            <div id="scoreboard-list" class="overflow-y-auto flex-1">
+                <!-- Players injected here -->
+            </div>
+        </div>
+
+        <div class="flex gap-4">
+            <button id="btn-host-restart" class="btn btn-primary hidden" onclick="window.returnToLobby()">BACK TO ROOM</button>
+            <button class="btn btn-outline" onclick="window.leaveRoom()">EXIT GAME</button>
+        </div>
+    </div>
+
+    <!-- SCREEN: GAME -->
+    <div id="screen-game" class="screen">
+        <div id="goal-flash" style="display: none;">
+            <h1 class="text-9xl font-black text-yellow-400 italic tracking-tighter" style="text-shadow: 10px 10px 0 rgba(0,0,0,0.5); -webkit-text-stroke: 4px black;">GOAL!</h1>
+        </div>
+
+        <button class="absolute top-4 right-4 z-20 bg-red-900/80 hover:bg-red-700 text-white px-4 py-2 rounded-lg text-xs font-bold border border-red-500/50" onclick="tryExitGame()">EXIT</button>
+       
+        <canvas id="canvas"></canvas>
+
+        <!-- Bottom HUD -->
+        <div id="bottom-hud">
+            <div class="score-box text-blue-400">
+                <div class="text-xs text-blue-500/70 font-bold tracking-wider">BLUE</div>
+                <div id="score-left">0</div>
+            </div>
+           
+            <div class="flex flex-col items-center">
+                <div id="game-timer" class="timer-box">00:00</div>
+                <div id="boost-bar-container" class="boost-container">
+                    <div id="boost-fill" class="boost-fill"></div>
+                    <div class="boost-text">BOOST</div>
+                </div>
+            </div>
+
+            <div class="score-box text-red-400">
+                <div class="text-xs text-red-500/70 font-bold tracking-wider">RED</div>
+                <div id="score-right">0</div>
+            </div>
+        </div>
+       
+        <!-- Modals -->
+        <div id="modal-pause" class="absolute inset-0 bg-black/80 hidden z-50 flex flex-col items-center justify-center backdrop-blur-sm">
+            <h2 class="text-5xl text-white font-black mb-10 italic">GAME PAUSED</h2>
+            <button class="btn btn-primary w-64 mb-6" onclick="pauseGame()">RESUME</button>
+        </div>
+
+        <div id="modal-exit" class="absolute inset-0 bg-black/90 hidden z-50 flex flex-col items-center justify-center backdrop-blur-sm">
+            <h2 class="text-3xl text-white font-bold mb-4">LEAVE GAME?</h2>
+            <p class="text-gray-400 mb-8">You will disconnect from the room.</p>
+            <div class="flex gap-4">
+                <button class="btn btn-danger w-32" onclick="window.leaveRoom()">LEAVE</button>
+                <button class="btn btn-outline w-32" onclick="cancelExit()">CANCEL</button>
+            </div>
+        </div>
+
+        <div id="modal-disconnected" class="absolute inset-0 bg-black/95 hidden z-50 flex flex-col items-center justify-center backdrop-blur-sm">
+            <h2 class="text-4xl text-red-500 font-black mb-4 italic">DISCONNECTED</h2>
+            <p class="text-gray-400 mb-8 text-center">The host has left the game.</p>
+            <button class="btn btn-primary w-48" onclick="window.leaveRoom()">RETURN TO MENU</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// --- FIELD & MECHANICS CONSTANTS ---
+const FIELD_CONSTANTS = {
+    COLOR_FIELD: '#2b2f3d',
+    COLOR_BLUE: '#0066cc',
+    COLOR_RED: '#cc0000',
+    GOAL_HEIGHT: 170,
+    GOAL_LINE_WIDTH: 7,
+    CANVAS_WIDTH: 1000,
+    CANVAS_HEIGHT: 600,
+    BALL_RADIUS: 17,
+    CAR_WIDTH: 40, 
+    CAR_HEIGHT: 22
+};
+
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const keys = {};
+
+// Initialize Host Config
+window.hostConfig = { mode: '1v1', type: 'timed', duration: 120, scoreTarget: 5, status: 'lobby' };
+
+// --- STATE ---
+let gameState = 'menu';
+let cars = [];
+let ball = null;
+let boostPads = [];
+let remoteEntities = {};
+let score = { left: 0, right: 0 };
+let lastTime = 0;
+let localCar = null;
+let gameTimer = 0;
+let lastSyncSec = -1;
+
+// --- TEST CANVAS ---
+const testCanvas = document.getElementById('test-canvas');
+const testCtx = testCanvas.getContext('2d');
+let testCar = { angle: 0 };
+
+// --- Custom Alert ---
+function showCustomAlert(message, title = "Alert") {
+    document.getElementById('custom-alert-title').innerText = title;
+    document.getElementById('custom-alert-message').innerText = message;
+    document.getElementById('custom-alert').style.display = 'flex';
+}
+function hideCustomAlert() {
+    document.getElementById('custom-alert').style.display = 'none';
+}
+// --------------------
+
+
+window.onload = () => {
+    canvas.width = FIELD_CONSTANTS.CANVAS_WIDTH;
+    canvas.height = FIELD_CONSTANTS.CANVAS_HEIGHT;
+    testCanvas.width = 300; testCanvas.height = 200;
+
+    // --- UPDATED: Added try...catch for localStorage ---
+    try {
+        // Load persisted data
+        const savedName = localStorage.getItem('player_name');
+        if (savedName) {
+            // UPDATED: Force uppercase on load
+            document.getElementById('inp-name').value = savedName.toUpperCase();
+            window.netState.user.username = savedName.toUpperCase(); // UPDATED: Set username on load
         }
+        
+        // Load Settings
+        const savedSettings = localStorage.getItem('car_settings');
+        if (savedSettings) window.gameSettings = JSON.parse(savedSettings);
+    } catch (e) {
+        console.warn("LocalStorage is disabled or unavailable. Settings will not be saved.", e);
+        showCustomAlert("Could not load saved data. Your browser may be blocking site data or you may be in private mode. Settings will not be saved.", "Storage Error");
+    }
+    // --- END UPDATED ---
+    
+    updateSettingsUI();
+    renderKeybinds();
+    requestAnimationFrame(testLoop);
+};
 
-        // --- Default Keybinds ---
-        const defaultKeybinds = [
-            { id: 1, up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', boost: 'ShiftLeft' },
-            // Players 2,3,4 are placeholders, usually controlled remotely or via different input schemes if local split screen (not implemented here)
-            { id: 2, up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', boost: 'ShiftRight' },
-            { id: 3, up: 'KeyT', down: 'KeyG', left: 'KeyF', right: 'KeyH', boost: 'Space' },
-            { id: 4, up: 'KeyI', down: 'KeyK', left: 'KeyJ', right: 'KeyL', boost: 'ControlRight' }
-        ];
+// --- SETTINGS FUNCTIONS ---
+function goToSettings() { switchScreen('screen-settings'); }
 
-        let playerSettings = {
-            keybinds: JSON.parse(JSON.stringify(defaultKeybinds)),
-            sensitivity: 1.0
-        };
+function setVisuals(mode) {
+    window.gameSettings.visuals = mode;
+    saveSettings();
+    updateSettingsUI();
+}
 
+function updateRotSpeed(val) {
+    window.gameSettings.rotSpeed = parseFloat(val);
+    document.getElementById('val-rot-speed').innerText = val;
+    saveSettings();
+}
 
-        const canvas = document.getElementById('canvas');
-        const ctx = canvas.getContext('2d');
-        const keys = {};
+function saveSettings() {
+    // --- UPDATED: Added try...catch ---
+    try {
+        localStorage.setItem('car_settings', JSON.stringify(window.gameSettings));
+    } catch(e) { 
+        console.warn('Could not save settings to localStorage.'); 
+    }
+    // --- END UPDATED ---
+    
+    // UPDATED: Update visual setting in our local player object
+    const me = window.netState.players.find(p => p.userId === window.netState.myId);
+    if (me) {
+        me.visualSetting = window.gameSettings.visuals;
+    }
+}
 
-        // Initialize Host Config
-        window.hostConfig = { mode: '1v1', type: 'timed', duration: 120, scoreTarget: 5, status: 'lobby' };
-
-        // --- STATE ---
-        let gameState = 'menu'; // 'menu', 'playing', 'paused', 'finished'
-        let gameMode = '1v1'; // '1v1', '2v2', '3v3'
-        let endConditionType = 'timed'; // 'timed', 'points'
-        let timeLimitSeconds = 120;
-        let targetScore = 5;
-
-        let cars = [];
-        let ball = null;
-        let boostPads = [];
-        let remoteBallData = null; // For client-side ball lerping
-        let scoreLeft = 0, scoreRight = 0;
-        let lastTime = 0;
-        let localCar = null;
-        let gameTimer = 0; // Host-side timer
-        let animationFrameId; // For game loop
-
-        // --- Mobile Joystick State ---
-        let joystickInputs = {
-            1: { active: false, angle: 0 }, // For Player 1 (localCar)
-        };
-
-        // --- Preview Loop for Settings ---
-        let previewAngle = 0;
-        function previewLoop() {
-            const cvs = document.getElementById('preview-canvas');
-            if (!cvs) { requestAnimationFrame(previewLoop); return; }
-            const c = cvs.getContext('2d');
-
-            // Clear
-            c.fillStyle = '#1f2937';
-            c.fillRect(0, 0, cvs.width, cvs.height);
-
-            // Update Angle based on sensitivity
-            const speed = 2.0 * playerSettings.sensitivity;
-            previewAngle += speed;
-
-            // Draw Car
-            c.save();
-            c.translate(cvs.width / 2, cvs.height / 2);
-            c.rotate(previewAngle * Math.PI / 180);
-
-            c.fillStyle = '#fbbf24';
-            c.beginPath();
-            c.roundRect(-20, -10, 40, 20, 4);
-            c.fill();
-
-            // Front indicator
-            c.fillStyle = 'yellow';
-            c.fillRect(10, -8, 5, 16);
-
-            c.restore();
-
-            requestAnimationFrame(previewLoop);
+function resetSettings() {
+    // UPDATED: New defaults for rotSpeed and keybinds
+    window.gameSettings = {
+        visuals: 'simple',
+        rotSpeed: 5.0,
+        keybinds: { 
+            up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', 
+            boost: 'ShiftLeft', boost_alt: 'ShiftRight' 
         }
+    };
+    saveSettings();
+    updateSettingsUI();
+    renderKeybinds();
+}
 
-        window.onload = () => {
-            canvas.width = DEFAULT_WIDTH;
-            canvas.height = DEFAULT_HEIGHT;
-            updateStatus(""); // Start hidden
+function updateSettingsUI() {
+    const s = window.gameSettings.visuals;
+    const btnS = document.getElementById('btn-vis-simple');
+    const btnC = document.getElementById('btn-vis-cool');
+    
+    if (s === 'simple') {
+        btnS.className = 'btn flex-1 btn-primary';
+        btnC.className = 'btn flex-1 bg-gray-600';
+    } else {
+        btnS.className = 'btn flex-1 bg-gray-600';
+        btnC.className = 'btn flex-1 btn-primary';
+    }
+    
+    document.getElementById('inp-rot-speed').value = window.gameSettings.rotSpeed;
+    document.getElementById('val-rot-speed').innerText = window.gameSettings.rotSpeed;
+}
 
-            loadSettings(); // Load Settings from LocalStorage
+// Keybind Logic
+function renderKeybinds() {
+    const list = document.getElementById('keybind-list');
+    list.innerHTML = '';
+    const map = { 
+        'up':'ACCELERATE', 'down':'REVERSE', 'left':'TURN LEFT', 'right':'TURN RIGHT'
+        // Note: Boost is handled separately
+    };
+    
+    Object.keys(window.gameSettings.keybinds).forEach(action => {
+        // --- UPDATED: Special handling for boost buttons ---
+        if (action === 'boost') {
+            const row = document.createElement('div');
+            row.className = 'flex justify-between items-center bg-gray-700 p-3 rounded';
+            
+            const label = document.createElement('span');
+            label.className = 'font-bold text-xs text-gray-300';
+            label.innerText = 'BOOST';
+            
+            const btnWrapper = document.createElement('div');
+            btnWrapper.className = 'flex gap-2';
 
-            const savedName = localStorage.getItem('player_name');
-            if (savedName) {
-                document.getElementById('inp-name').value = savedName;
+            const btn1 = document.createElement('button');
+            btn1.className = 'btn-bind';
+            btn1.innerText = window.gameSettings.keybinds['boost'];
+            btn1.onclick = () => startRebind(btn1, 'boost');
+            
+            const btn2 = document.createElement('button');
+            btn2.className = 'btn-bind';
+            btn2.innerText = window.gameSettings.keybinds['boost_alt'] || 'NONE'; // Handle if alt doesn't exist
+            btn2.onclick = () => startRebind(btn2, 'boost_alt');
+
+            btnWrapper.appendChild(btn1);
+            btnWrapper.appendChild(btn2);
+            row.appendChild(label);
+            row.appendChild(btnWrapper);
+            list.appendChild(row);
+
+        } else if (action !== 'boost_alt') { // Skip boost_alt, it's handled above
+            const row = document.createElement('div');
+            row.className = 'flex justify-between items-center bg-gray-700 p-3 rounded';
+            
+            const label = document.createElement('span');
+            label.className = 'font-bold text-xs text-gray-300';
+            label.innerText = map[action];
+            
+            const btn = document.createElement('button');
+            btn.className = 'btn-bind';
+            btn.innerText = window.gameSettings.keybinds[action];
+            btn.onclick = () => startRebind(btn, action);
+            
+            row.appendChild(label);
+            row.appendChild(btn);
+            list.appendChild(row);
+        }
+    });
+}
+
+
+function startRebind(btn, action) {
+    btn.innerText = 'PRESS KEY';
+    btn.classList.add('binding');
+    
+    const handler = (e) => {
+        e.preventDefault();
+        window.gameSettings.keybinds[action] = e.code;
+        saveSettings();
+        renderKeybinds();
+        window.removeEventListener('keydown', handler);
+    };
+    window.addEventListener('keydown', handler);
+}
+
+// Test Drive Loop
+function testLoop() {
+    if (document.getElementById('screen-settings').classList.contains('active')) {
+        testCtx.clearRect(0,0,300,200);
+        testCtx.fillStyle = '#111827';
+        testCtx.fillRect(0,0,300,200);
+        
+        // Input for test
+        if (keys['KeyA'] || keys['ArrowLeft']) testCar.angle += parseFloat(window.gameSettings.rotSpeed);
+        if (keys['KeyD'] || keys['ArrowRight']) testCar.angle -= parseFloat(window.gameSettings.rotSpeed);
+        
+        testCtx.save();
+        testCtx.translate(150, 100);
+        testCtx.rotate(-testCar.angle * Math.PI / 180);
+        
+        // Draw Car (Test Area)
+        const w = 40, h = 22;
+        const color = '#3b82f6';
+        
+        // --- DRAWING LOGIC (COPIED FROM CAR CLASS FOR CONSISTENCY) ---
+        if (window.gameSettings.visuals === 'cool') {
+            // --- UPDATED COOL VISUAL V2 ---
+            const wheelW = 6, wheelH = 10;
+            const wheelOffset = 4;
+            // Draw Wheels (Black)
+            testCtx.fillStyle = '#111827';
+            testCtx.fillRect(-w/2 + 5, -h/2 - wheelOffset, wheelW, wheelH); // Front Left
+            testCtx.fillRect(w/2 - 5 - wheelW, -h/2 - wheelOffset, wheelW, wheelH); // Front Right
+            testCtx.fillRect(-w/2 + 5, h/2 - wheelH + wheelOffset, wheelW, wheelH); // Rear Left
+            testCtx.fillRect(w/2 - 5 - wheelW, h/2 - wheelH + wheelOffset, wheelW, wheelH); // Rear Right
+
+            // Main Body (Team Color)
+            testCtx.fillStyle = color;
+            testCtx.beginPath(); testCtx.roundRect(-w/2,-h/2, w, h, 4); testCtx.fill();
+
+            // Racing Stripes (Dual White)
+            testCtx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            testCtx.fillRect(-w/2, -h/2 + 5, w, 4); // Stripe 1
+            testCtx.fillRect(-w/2, h/2 - 9, w, 4); // Stripe 2
+            
+            // New Windshield (Angled)
+            testCtx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            testCtx.beginPath();
+            testCtx.moveTo(w/2 - 17, -h/2 + 3); // Top-left corner (relative to car center)
+            testCtx.lineTo(w/2 - 7, -h/2 + 3); // Top-right
+            testCtx.lineTo(w/2 - 10, h/2 - 3); // Bottom-right
+            testCtx.lineTo(w/2 - 20, h/2 - 3); // Bottom-left
+            testCtx.closePath(); testCtx.fill();
+            
+            // Headlights
+            testCtx.fillStyle = '#FFFF99'; // Pale Yellow
+            testCtx.fillRect(w/2 - 6, -h/2 + 4, 6, 5); // Right Headlight
+            testCtx.fillRect(w/2 - 6, h/2 - 9, 6, 5); // Left Headlight
+        
+            // Taillights
+            testCtx.fillStyle = '#FF0000'; // Red
+            testCtx.fillRect(-w/2, -h/2 + 5, 3, 4);
+            testCtx.fillRect(-w/2, h/2 - 9, 3, 4);
+            // --- END UPDATED COOL VISUAL V2 ---
+
+        } else {
+            // Simple Style
+            testCtx.fillStyle = color;
+            testCtx.beginPath(); testCtx.roundRect(-w/2,-h/2, w, h, 4); testCtx.fill();
+            // Brighter Yellow Windscreen (Moved forward)
+            testCtx.fillStyle = '#ffff00'; // Brighter Yellow
+            testCtx.beginPath(); testCtx.roundRect(8, -h/2+3, 8, h-6, 2); testCtx.fill();
+        }
+        // -------------------------------------------------------------
+
+        testCtx.restore();
+    }
+    requestAnimationFrame(testLoop);
+}
+
+// --- UI FUNCTIONS ---
+function switchScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+}
+window.switchScreen = switchScreen;
+
+function validateName() {
+    const n = document.getElementById('inp-name').value.trim().toUpperCase(); // Force uppercase
+    const err = document.getElementById('name-error');
+    if(n.length < 3) { err.style.opacity = '1'; return null; }
+    err.style.opacity = '0';
+    // --- UPDATED: Added try...catch ---
+    try {
+        localStorage.setItem('player_name', n);
+    } catch(e) { 
+        console.warn('Could not save name to localStorage.'); 
+    }
+    // --- END UPDATED ---
+    return n;
+}
+function goToModeSelect() {
+    const name = validateName();
+    if(name) { window.netState.user.username = name.toUpperCase(); switchScreen('screen-mode'); }
+}
+function goToJoin() {
+    const name = validateName();
+    if(name) {
+        window.netState.user.username = name.toUpperCase();
+        updateStatus("Initializing Peer...", "text-yellow-400");
+        initPeer().then(() => { switchScreen('screen-join'); });
+    }
+}
+async function joinRoomAction() {
+    const code = document.getElementById('inp-room-code').value.trim().toUpperCase();
+    if(code.length < 1) return showCustomAlert("Please enter a room code.");
+    connectToHost(code);
+}
+
+// Host Setup Flow
+function setHostMode(mode) { window.hostConfig.mode = mode; switchScreen('screen-type'); }
+function setHostType(type) {
+    window.hostConfig.type = type;
+    const container = document.getElementById('limit-buttons');
+    container.innerHTML = '';
+    const title = document.getElementById('limit-title');
+    const options = type === 'timed'
+        ? [{l:'1 MIN', v:60}, {l:'2 MIN', v:120}, {l:'5 MIN', v:300}]
+        : [{l:'3 PTS', v:3}, {l:'5 PTS', v:5}, {l:'10 PTS', v:10}];
+    title.innerText = type === 'timed' ? 'SELECT DURATION' : 'SELECT SCORE LIMIT';
+    options.forEach(opt => {
+        const div = document.createElement('div');
+        div.className = 'mode-card'; div.style.width = '120px'; div.style.height = '100px';
+        div.innerHTML = opt.l; div.onclick = () => finishHostSetup(opt.v);
+        container.appendChild(div);
+    });
+    switchScreen('screen-limit');
+}
+
+window.finalizeCreateRoom = async () => {
+    if(window.hostConfig.type === 'timed') window.hostConfig.duration = window.tempDuration;
+    else window.hostConfig.scoreTarget = window.tempDuration;
+
+    updateStatus("Creating Room...", "text-yellow-400");
+    const roomId = Math.random().toString(36).substring(2, 8).toUpperCase().padEnd(6, 'X');
+   
+    try {
+        await initPeer(roomId);
+        window.netState.isHost = true;
+        window.netState.roomId = roomId;
+        window.hostConfig.hostId = roomId;
+       
+        // UPDATED: Store host's visual setting and uppercase name
+        window.netState.players = [{
+            roomId: roomId, userId: window.netState.myId, username: window.netState.user.username.toUpperCase(),
+            isHost: true, isReady: false, slotIndex: -1, team: 'spectator', 
+            stats: { goals: 0, hits: 0, saves: 0 },
+            visualSetting: window.gameSettings.visuals
+        }];
+
+        document.getElementById('lobby-code').innerText = roomId;
+        window.updateLobbyUI(window.hostConfig);
+        window.renderSlots(window.netState.players);
+        window.switchScreen('screen-lobby');
+    } catch(e) { console.error("Room creation failed", e); }
+};
+
+function finishHostSetup(val) { window.tempDuration = val; window.finalizeCreateRoom(); }
+
+// --- LOBBY ACTIONS ---
+
+window.leaveRoom = async () => { window.isIntentionalExit = true; location.reload(); };
+
+window.resetGameObjects = () => {
+    gameState = 'menu';
+    cars = []; ball = null; score = {left:0, right:0};
+    document.getElementById('modal-exit').style.display = 'none';
+};
+
+function lobbyAction() {
+    const uid = window.netState.myId;
+    const me = window.netState.players.find(p => p.userId === uid);
+    if(me && me.slotIndex !== -1) window.toggleReady();
+    else {
+        // Auto-join first open slot
+        const mode = window.hostConfig.mode || '1v1';
+        const max = mode === '2v2' ? 4 : (mode === '3v3' ? 6 : 2);
+        for(let i=0; i<max; i++) {
+            if(!window.netState.players.find(p => p.slotIndex === i)) { window.claimSlot(i); break; }
+        }
+    }
+}
+
+// Randomise into ANY slot (shuffled) to vary spawn position
+window.randomiseTeams = () => {
+    if (!window.netState.isHost) return;
+    const mode = window.hostConfig.mode || '1v1';
+    const maxSlots = mode === '2v2' ? 4 : (mode === '3v3' ? 6 : 2);
+    
+    // 1. Reset everyone to spectator
+    window.netState.players.forEach(p => { 
+        p.slotIndex = -1; 
+        p.team = 'spectator'; 
+        p.isReady = false; 
+    });
+
+    // 2. Get Humans and Shuffle them
+    let humans = window.netState.players.filter(p => !p.userId.startsWith('ai_'));
+    for (let i = humans.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [humans[i], humans[j]] = [humans[j], humans[i]];
+    }
+
+    // 3. Prepare Available Slots (Blue: 0,2,4.. Red: 1,3,5..)
+    let blueSlots = [], redSlots = [];
+    for(let i=0; i<maxSlots; i++) {
+        if(i%2===0) blueSlots.push(i); else redSlots.push(i);
+    }
+    // Shuffle the slots themselves so players spawn in random positions
+    blueSlots.sort(() => Math.random() - 0.5);
+    redSlots.sort(() => Math.random() - 0.5);
+
+    // 4. Assign humans to slots, alternating teams to maintain balance
+    humans.forEach((p, i) => {
+        if (i < maxSlots) { // Only if room isn't overflowing
+            if (i % 2 === 0) {
+                // Assign to random Blue slot
+                if(blueSlots.length > 0) {
+                    const s = blueSlots.pop();
+                    p.slotIndex = s; p.team = 'left';
+                }
+            } else {
+                // Assign to random Red slot
+                if(redSlots.length > 0) {
+                    const s = redSlots.pop();
+                    p.slotIndex = s; p.team = 'right';
+                }
             }
-
-            // Add mobile class to body if needed
-            if (isMobileMode) {
-                document.body.classList.add('mobile-mode');
-                // Removed check-mobile force
-            }
-
-            // Setup mobile controls
-            setupJoystick('joystick-area-left', 'joystick-left', '.joystick-stick', 1, false, true, { bottom: '30px', left: '30px' });
-            setupButton('btn-boost', 'ShiftLeft'); // Maps to P1's boost key
-
-            // Start Preview Loop
-            requestAnimationFrame(previewLoop);
-        };
-
-        // --- SETTINGS FUNCTIONS ---
-        function loadSettings() {
-            const saved = localStorage.getItem('gameSettings');
-            if (saved) {
-                const parsed = JSON.parse(saved);
-                if (parsed.sensitivity) playerSettings.sensitivity = parsed.sensitivity;
-                if (parsed.keybinds) playerSettings.keybinds = parsed.keybinds;
-
-                // Update UI
-                document.getElementById('inp-sensitivity').value = playerSettings.sensitivity;
-                document.getElementById('sens-val').innerText = playerSettings.sensitivity;
-                updateKeybindUI();
-            }
         }
+    });
 
-        function saveSettings() {
-            localStorage.setItem('gameSettings', JSON.stringify(playerSettings));
-        }
+    broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+    window.renderSlots(window.netState.players);
+};
 
-        function openSettings() { switchScreen('screen-settings'); }
-        function closeSettings() {
-            if (window.netState.roomId) switchScreen('screen-lobby');
-            else switchScreen('screen-start');
-        }
-        function resetSettings() {
-            playerSettings = {
-                keybinds: JSON.parse(JSON.stringify(defaultKeybinds)),
-                sensitivity: 1.0
+window.claimSlot = (idx) => {
+    const uid = window.netState.myId;
+    const team = idx % 2 === 0 ? 'left' : 'right';
+    if (window.netState.isHost) {
+        const me = window.netState.players.find(p => p.userId === uid);
+        if(me) { me.slotIndex = idx; me.team = team; me.isReady = false; }
+        broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+        window.renderSlots(window.netState.players);
+    } else { sendToHost('SLOT_UPDATE', { action: 'claim', index: idx, team: team }); }
+};
+
+window.toggleReady = () => {
+    const uid = window.netState.myId;
+    const me = window.netState.players.find(p => p.userId === uid);
+    if (!me || me.slotIndex === -1) return;
+    const newState = !me.isReady;
+    if (window.netState.isHost) {
+        me.isReady = newState;
+        broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+        window.renderSlots(window.netState.players);
+    } else { sendToHost('SLOT_UPDATE', { action: 'ready', state: newState }); }
+};
+
+window.startGame = () => {
+    if (!window.netState.isHost) return;
+    window.netState.players.forEach(p => { p.stats = { goals: 0, hits: 0, saves: 0 }; });
+    
+    // --- UPDATED: Add AI players to the list ---
+    const mode = window.hostConfig.mode || '1v1';
+    const count = mode === '2v2' ? 4 : (mode === '3v3' ? 6 : 2);
+    for (let i = 0; i < count; i++) {
+        const p = window.netState.players.find(pl => pl.slotIndex === i);
+        if (!p) {
+            // This is an AI slot
+            const isRed = i % 2 !== 0;
+            const aiPlayer = {
+                roomId: window.netState.roomId,
+                userId: `ai_${i}`, // Consistent ID
+                username: `BOT ${i+1}`, // UPDATED: New Name
+                isHost: false, isReady: true, slotIndex: i, 
+                team: isRed ? 'right' : 'left',
+                isAI: true, // Add a flag
+                stats: { goals: 0, hits: 0, saves: 0 }
             };
-            document.getElementById('inp-sensitivity').value = 1.0;
-            document.getElementById('sens-val').innerText = "1.0";
-            // Removed check-mobile reset
-            toggleMobileMode(false);
-            updateKeybindUI();
-            saveSettings();
+            window.netState.players.push(aiPlayer);
         }
+    }
+    // --- END UPDATED ---
 
-        function updateSensitivity(val) {
-            playerSettings.sensitivity = parseFloat(val);
-            document.getElementById('sens-val').innerText = val;
-            saveSettings();
+    window.hostConfig.status = 'playing';
+    broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+    window.initGame(window.hostConfig);
+};
+
+window.returnToLobby = () => {
+    if (!window.netState.isHost) return;
+    window.hostConfig.status = 'lobby';
+    window.resetGameObjects();
+    
+    // UPDATED: Remove AI players from the list
+    window.netState.players = window.netState.players.filter(p => !p.isAI);
+    
+    window.switchScreen('screen-lobby');
+    broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
+};
+
+function tryExitGame() { document.getElementById('modal-exit').style.display = 'flex'; }
+function cancelExit() { document.getElementById('modal-exit').style.display = 'none'; }
+function pauseGame() {
+    if (!window.netState.isHost) return;
+    const modal = document.getElementById('modal-pause');
+    const isPaused = modal.style.display === 'flex';
+    if(isPaused) modal.style.display = 'none'; else modal.style.display = 'flex';
+}
+
+// --- RENDERERS ---
+window.updateLobbyUI = (data) => {
+    window.hostConfig = data;
+    document.getElementById('info-mode').innerText = `MODE: ${data.mode}`;
+    document.getElementById('info-type').innerText = `TYPE: ${data.type.toUpperCase()}`;
+    document.getElementById('info-limit').innerText = `LIMIT: ${data.type==='timed'?(data.duration/60)+' MIN':data.scoreTarget + ' PTS'}`;
+};
+
+window.renderSlots = (players) => {
+    const slotsBlue = document.getElementById('slots-blue');
+    const slotsRed = document.getElementById('slots-red');
+    slotsBlue.innerHTML = ''; slotsRed.innerHTML = '';
+   
+    const mode = window.hostConfig.mode || '1v1';
+    const count = mode === '2v2' ? 4 : (mode === '3v3' ? 6 : 2);
+    const me = players.find(p => p.userId === window.netState.myId);
+   
+    const btn = document.getElementById('btn-lobby-action');
+    const startBtn = document.getElementById('btn-host-start');
+    const randBtn = document.getElementById('btn-randomise');
+    const hostWarning = document.getElementById('host-warning');
+   
+    if(window.netState.isHost) {
+        randBtn.style.display = 'block';
+        const readyCount = players.filter(p => p.slotIndex !== -1 && p.isReady).length;
+        const totalHumans = players.filter(p => p.slotIndex !== -1 && !p.isAI).length; // Check humans
+        const totalPlayers = players.filter(p => p.slotIndex !== -1).length;
+        
+        startBtn.style.display = 'block';
+        startBtn.disabled = totalPlayers === 0 || readyCount !== totalPlayers; // All players (inc AI) must be ready
+        if(startBtn.disabled) startBtn.classList.add('opacity-50', 'cursor-not-allowed');
+        else startBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+        
+        hostWarning.style.display = (me && me.slotIndex === -1) ? 'block' : 'none';
+    } else {
+        startBtn.style.display = 'none'; randBtn.style.display = 'none'; hostWarning.style.display = 'none';
+    }
+
+    if(me && me.slotIndex !== -1) {
+        btn.innerText = me.isReady ? "READY!" : "CLICK TO READY UP";
+        btn.className = `btn w-80 shadow-xl ${me.isReady ? 'bg-green-500 hover:bg-green-400 text-white' : 'btn-primary'}`;
+    } else {
+        btn.innerText = "JOIN A SLOT";
+        btn.className = "btn btn-primary w-80";
+    }
+
+    for(let i=0; i<count; i++) {
+        const isRed = i % 2 !== 0;
+        const container = isRed ? slotsRed : slotsBlue;
+        const p = players.find(pl => pl.slotIndex === i);
+        const div = document.createElement('div');
+        if(p) {
+            // This player slot is filled (by human or AI)
+            div.className = `slot filled ${isRed?'red':'blue'}`;
+            div.innerHTML = `<div class="flex items-center gap-3"><div class="text-white font-bold text-lg uppercase">${p.username}</div>${p.isHost ? '<span class="text-xxs bg-yellow-500 text-black px-1 rounded font-bold">HOST</span>' : ''}</div><div class="px-2 py-1 rounded text-xs font-bold ${p.isReady ? 'bg-green-500 text-white' : 'bg-yellow-500/50 text-yellow-100'}">${p.isReady ? 'READY' : 'WAITING'}</div>`;
+        } else {
+            // This slot is empty (will be AI)
+            // UPDATED: AI Bot Name
+            div.className = "slot ai";
+            div.innerHTML = `<div class="text-gray-400 font-bold flex items-center gap-2"><span>🤖</span> BOT</div><div class="text-xs text-gray-500 font-bold border border-gray-600 px-2 py-1 rounded hover:bg-gray-700 hover:text-white">JOIN</div>`;
+            div.onclick = () => window.claimSlot(i);
         }
+        container.appendChild(div);
+    }
+};
 
-        function toggleMobileMode(forced) {
-            isMobileMode = forced;
-            if (isMobileMode) document.body.classList.add('mobile-mode');
-            else document.body.classList.remove('mobile-mode');
+// --- GAME MECHANICS ---
+
+function drawField(ctx, canvas) {
+    ctx.fillStyle = FIELD_CONSTANTS.COLOR_FIELD;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    let goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT;
+    let playerGoalTop = canvas.height / 2 - goalHeight / 2;
+    let playerGoalBottom = canvas.height / 2 + goalHeight / 2;
+
+    ctx.fillStyle = 'rgba(0, 102, 204, 0.2)'; ctx.fillRect(0, playerGoalTop, 20, goalHeight);
+    ctx.fillStyle = 'rgba(204, 0, 0, 0.2)'; ctx.fillRect(canvas.width - 20, playerGoalTop, 20, goalHeight);
+
+    ctx.strokeStyle = "#dcdcdc"; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(canvas.width / 2, 0); ctx.lineTo(canvas.width / 2, canvas.height); ctx.stroke();
+    ctx.beginPath(); ctx.arc(canvas.width / 2, canvas.height / 2, 80, 0, Math.PI * 2); ctx.stroke();
+   
+    ctx.strokeStyle = FIELD_CONSTANTS.COLOR_BLUE; ctx.lineWidth = FIELD_CONSTANTS.GOAL_LINE_WIDTH;
+    ctx.beginPath(); ctx.moveTo(0, playerGoalTop); ctx.lineTo(0, playerGoalBottom); ctx.stroke();
+    ctx.strokeStyle = FIELD_CONSTANTS.COLOR_RED;
+    ctx.beginPath(); ctx.moveTo(canvas.width, playerGoalTop); ctx.lineTo(canvas.width, playerGoalBottom); ctx.stroke();
+}
+
+function checkGoal(ball, canvas) {
+    let goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT + 20;
+    let goalTop = canvas.height/2 - goalHeight/2;
+    let goalBottom = canvas.height/2 + goalHeight/2;
+    if (ball.y > goalTop && ball.y < goalBottom && ball.x - ball.radius <= 5) return 'right';
+    if (ball.y > goalTop && ball.y < goalBottom && ball.x + ball.radius >= canvas.width - 5) return 'left';
+    return null;
+}
+
+class BoostPad {
+    constructor(x, y) { this.x=x; this.y=y; this.active=true; this.cooldown=0; this.radius=12; }
+    update(dt) { if(!this.active) { this.cooldown-=dt; if(this.cooldown<=0) this.active=true; } }
+    draw() {
+        ctx.save(); ctx.translate(this.x, this.y);
+        ctx.globalAlpha = this.active ? 1 : 0.2;
+        
+        ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(0,0, this.radius, 0, Math.PI*2); ctx.stroke();
+        
+        if (this.active) {
+            ctx.shadowBlur = 10; ctx.shadowColor = '#fbbf24';
+            ctx.fillStyle = '#f59e0b';
+            ctx.beginPath(); ctx.arc(0,0, this.radius*0.6, 0, Math.PI*2); ctx.fill();
         }
+        ctx.restore();
+    }
+}
 
-        function updateKeybindUI() {
-            const k = playerSettings.keybinds[0];
-            const map = (code) => code.replace('Key', '').replace('Arrow', '');
-            document.getElementById('bind-up').innerText = map(k.up);
-            document.getElementById('bind-down').innerText = map(k.down);
-            document.getElementById('bind-left').innerText = map(k.left);
-            document.getElementById('bind-right').innerText = map(k.right);
-            document.getElementById('bind-boost').innerText = map(k.boost);
-        }
+class Car {
+    constructor(id, x, y, angle, team, isLocal, isAI, ownerId) {
+        this.id = id; this.x = x; this.y = y; this.angle = angle;
+        this.team = team; this.isLocal = isLocal; this.isAI = isAI; this.ownerId = ownerId;
+        this.velX=0; this.velY=0;
+        // UPDATED: Slower physics
+        this.baseAcceleration = 0.25; 
+        this.baseMaxSpeed = 5.0;
+        this.boostPower = 1.7;
+        this.baseSideFrictionFactor = 0.07; // More "heavy" feel
+        // END UPDATED
 
-        let rebindAction = null;
-        function startRebind(action) {
-            rebindAction = action;
-            const btn = document.getElementById('bind-' + action);
-            btn.innerText = "...";
-            btn.classList.add('listening');
-            document.getElementById('rebind-overlay').style.display = 'flex';
+        // UPDATED: AI has faster base rotation
+        this.baseRotationSpeed = this.isAI ? 4.5 : 3.0;
+        this.boost=100;
+        this.width=FIELD_CONSTANTS.CAR_WIDTH; this.height=FIELD_CONSTANTS.CAR_HEIGHT;
+        this.color=team==='left'?'#0066cc':'#cc0000'; this.boosting=false;
+        this.role='attacker'; this.isFriendlyAI=(team==='left'); this.aiThrottle=0;
+        this.aiStuckState='none'; this.aiStuckStateTimer=0; this.stuckThresholdDist=150;
+        this.difficulty=3;
+    }
+    update(dt) {
+        if (this.isLocal) {
+            const kb = window.gameSettings.keybinds;
+            const rotSpeed = window.gameSettings.rotSpeed || 5.0; // Use updated default
+            
+            let throttle = 0;
+            if (keys[kb.up]) throttle = 1;
+            else if (keys[kb.down]) throttle = -1;
+            
+            if (keys[kb.left]) this.angle = (this.angle + rotSpeed) % 360;
+            if (keys[kb.right]) this.angle = (this.angle - rotSpeed) % 360;
+            
+            // UPDATED: Dual BOOST KEY LOGIC
+            let isBoostPressed = false;
+            const bind1 = kb.boost;
+            const bind2 = kb.boost_alt;
 
-            // Add one-time listener
-            window.addEventListener('keydown', handleRebind);
-        }
-
-        function handleRebind(e) {
-            e.preventDefault();
-            if (e.code === 'Escape') {
-                // Cancel
-            } else {
-                playerSettings.keybinds[0][rebindAction] = e.code;
-                saveSettings();
-            }
-
-            // Cleanup
-            document.getElementById('rebind-overlay').style.display = 'none';
-            const btn = document.getElementById('bind-' + rebindAction);
-            btn.classList.remove('listening');
-            updateKeybindUI();
-            window.removeEventListener('keydown', handleRebind);
-            rebindAction = null;
-        }
-
-        // --- UI FUNCTIONS ---
-        function switchScreen(id) {
-            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-            document.getElementById(id).classList.add('active');
-        }
-        window.switchScreen = switchScreen;
-
-        function validateName() {
-            const n = document.getElementById('inp-name').value.trim();
-            const err = document.getElementById('name-error');
-            if (n.length < 3) { err.style.opacity = '1'; return null; }
-            err.style.opacity = '0';
-            localStorage.setItem('player_name', n);
-            return n;
-        }
-        function goToModeSelect() {
-            const name = validateName();
-            if (name) {
-                window.netState.user.username = name;
-                switchScreen('screen-mode');
-            }
-        }
-        function goToJoin() {
-            const name = validateName();
-            if (name) {
-                window.netState.user.username = name;
-                updateStatus("Initializing Peer...", "text-yellow-400");
-                initPeer().then(() => {
-                    switchScreen('screen-join');
-                });
-            }
-        }
-        async function joinRoomAction() {
-            const code = document.getElementById('inp-room-code').value.trim().toUpperCase();
-            if (code.length < 1) return; // No alert
-            connectToHost(code);
-        }
-
-        // Host Setup Flow
-        function setHostMode(mode) { window.hostConfig.mode = mode; switchScreen('screen-type'); }
-        function setHostType(type) {
-            window.hostConfig.type = type;
-            const container = document.getElementById('limit-buttons');
-            container.innerHTML = '';
-            const title = document.getElementById('limit-title');
-            const options = type === 'timed'
-                ? [{ l: '1 MIN', v: 60 }, { l: '2 MIN', v: 120 }, { l: '5 MIN', v: 300 }]
-                : [{ l: '3 PTS', v: 3 }, { l: '5 PTS', v: 5 }, { l: '10 PTS', v: 10 }];
-            title.innerText = type === 'timed' ? 'SELECT DURATION' : 'SELECT SCORE LIMIT';
-            options.forEach(opt => {
-                const div = document.createElement('div');
-                div.className = 'mode-card';
-                div.style.width = '120px'; div.style.height = '100px';
-                div.innerHTML = opt.l;
-                div.onclick = () => finishHostSetup(opt.v);
-                container.appendChild(div);
-            });
-            switchScreen('screen-limit');
-        }
-
-        window.finalizeCreateRoom = async () => {
-            if (window.hostConfig.type === 'timed') window.hostConfig.duration = window.tempDuration;
-            else window.hostConfig.scoreTarget = window.tempDuration;
-
-            updateStatus("Creating Room...", "text-yellow-400");
-            const roomId = Math.random().toString(36).substring(2, 8).toUpperCase().padEnd(6, 'X');
-
-            try {
-                await initPeer(roomId);
-                window.netState.isHost = true;
-                window.netState.roomId = roomId;
-                window.hostConfig.hostId = roomId;
-
-                window.netState.players = [{
-                    roomId: roomId,
-                    userId: window.netState.myId,
-                    username: window.netState.user.username,
-                    isHost: true,
-                    isReady: false,
-                    slotIndex: -1,
-                    team: 'spectator'
-                }];
-
-                document.getElementById('lobby-code').innerText = roomId;
-                window.updateLobbyUI(window.hostConfig);
-                window.renderSlots(window.netState.players);
-                window.switchScreen('screen-lobby');
-
-            } catch (e) {
-                console.error("Room creation failed", e);
-            }
-        };
-
-        function finishHostSetup(val) {
-            window.tempDuration = val;
-            window.finalizeCreateRoom();
-        }
-
-        // --- LOBBY ACTIONS ---
-
-        window.leaveRoom = async () => {
-            window.isIntentionalExit = true;
-            location.reload();
-        };
-
-        function lobbyAction() {
-            const uid = window.netState.myId;
-            const me = window.netState.players.find(p => p.userId === uid);
-            if (me && me.slotIndex !== -1) window.toggleReady();
-        }
-
-        window.claimSlot = (idx) => {
-            const uid = window.netState.myId;
-            const team = idx % 2 === 0 ? 'left' : 'right'; // left = blue, right = red
-
-            if (window.netState.isHost) {
-                const me = window.netState.players.find(p => p.userId === uid);
-                if (me) { me.slotIndex = idx; me.team = team; me.isReady = false; }
-                broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
-                window.renderSlots(window.netState.players);
-            } else {
-                sendToHost('SLOT_UPDATE', { action: 'claim', index: idx, team: team });
-            }
-        };
-
-        window.toggleReady = () => {
-            const uid = window.netState.myId;
-            const me = window.netState.players.find(p => p.userId === uid);
-            if (!me || me.slotIndex === -1) return;
-
-            const newState = !me.isReady;
-            if (window.netState.isHost) {
-                me.isReady = newState;
-                broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
-                window.renderSlots(window.netState.players);
-            } else {
-                sendToHost('SLOT_UPDATE', { action: 'ready', state: newState });
-            }
-        };
-
-        window.startGame = () => {
-            if (!window.netState.isHost) return;
-            window.hostConfig.status = 'playing';
-            broadcastToClients('LOBBY_STATE', { settings: window.hostConfig, players: window.netState.players, roomId: window.netState.roomId });
-            window.initGame(window.hostConfig);
-        };
-
-        function tryExitGame() { document.getElementById('modal-exit').style.display = 'flex'; }
-        function cancelExit() { document.getElementById('modal-exit').style.display = 'none'; }
-
-        function resumeGame() {
-            const modal = document.getElementById('modal-pause');
-            modal.style.display = 'none';
-            if (window.netState.isHost) {
-                gameState = 'playing';
-                lastTime = performance.now(); // Reset delta time
-                animationFrameId = requestAnimationFrame(gameLoop);
-                broadcastToClients('GAME_UPDATE', { paused: false });
-            }
-        }
-        function pauseGame() {
-            if (!window.netState.isHost) return; // Only host can pause
-            const modal = document.getElementById('modal-pause');
-            modal.style.display = 'flex';
-            gameState = 'paused';
-            if (animationFrameId) cancelAnimationFrame(animationFrameId);
-            broadcastToClients('GAME_UPDATE', { paused: true });
-        }
-
-
-        // --- RENDERERS ---
-        window.updateLobbyUI = (data) => {
-            window.hostConfig = data;
-            document.getElementById('info-mode').innerText = `MODE: ${data.mode}`;
-            document.getElementById('info-type').innerText = `TYPE: ${data.type.toUpperCase()}`;
-            document.getElementById('info-limit').innerText = `LIMIT: ${data.type === 'timed' ? (data.duration / 60) + ' MIN' : data.scoreTarget + ' PTS'}`;
-        };
-
-        window.renderSlots = (players) => {
-            const slotsBlue = document.getElementById('slots-blue');
-            const slotsRed = document.getElementById('slots-red');
-            slotsBlue.innerHTML = ''; slotsRed.innerHTML = '';
-
-            const mode = window.hostConfig.mode || '1v1';
-            const count = mode === '2v2' ? 4 : (mode === '3v3' ? 6 : 2);
-            const uid = window.netState.myId;
-            const me = players.find(p => p.userId === uid);
-
-            const btn = document.getElementById('btn-lobby-action');
-            const startBtn = document.getElementById('btn-host-start');
-            const hostWarning = document.getElementById('host-warning');
-
-            if (window.netState.isHost) {
-                const readyCount = players.filter(p => p.slotIndex !== -1 && p.isReady).length;
-                const totalHumans = players.filter(p => p.slotIndex !== -1).length;
-                const hostInSlot = me && me.slotIndex !== -1;
-                startBtn.style.display = 'block';
-                if (hostInSlot && totalHumans > 0 && readyCount === totalHumans) {
-                    startBtn.disabled = false; startBtn.classList.remove('opacity-50', 'cursor-not-allowed');
-                    hostWarning.style.display = 'none';
+            const checkBind = (bind) => {
+                if (!bind) return false;
+                // Handle generic "Shift" or "Control"
+                if (bind.includes('Shift')) {
+                    return keys['ShiftLeft'] || keys['ShiftRight'];
+                } else if (bind.includes('Control')) {
+                    return keys['ControlLeft'] || keys['ControlRight'];
                 } else {
-                    startBtn.disabled = true; startBtn.classList.add('opacity-50', 'cursor-not-allowed');
-                    if (!hostInSlot) hostWarning.style.display = 'block'; else hostWarning.style.display = 'none';
+                    return keys[bind];
                 }
-            } else { startBtn.style.display = 'none'; hostWarning.style.display = 'none'; }
+            };
 
-            if (me && me.slotIndex !== -1) {
-                btn.innerText = me.isReady ? "READY!" : "CLICK TO READY UP";
-                btn.className = `btn w-80 shadow-xl ${me.isReady ? 'bg-green-500 hover:bg-green-400 text-white' : 'btn-primary'}`;
-            } else {
-                btn.innerText = "JOIN A SLOT FIRST";
-                btn.className = "btn btn-outline w-80 text-gray-500 border-gray-500 cursor-not-allowed";
-            }
+            isBoostPressed = checkBind(bind1) || checkBind(bind2);
+            this.boosting = !!(isBoostPressed && this.boost > 0);
+           
+            let rad = Math.PI * this.angle / 180;
+            let fVel = this.velX*Math.cos(rad) - this.velY*Math.sin(rad);
+            let sVel = this.velX*Math.sin(rad) + this.velY*Math.cos(rad);
+            if (throttle !== 0) fVel += throttle * this.baseAcceleration;
+            if (this.boosting) { fVel += this.baseAcceleration * this.boostPower * (throttle || 1); this.boost = Math.max(0, this.boost - 1.0); }
+            fVel *= 0.96; sVel *= (1 - this.baseSideFrictionFactor);
+            this.velX = fVel * Math.cos(rad) + sVel * Math.sin(rad);
+            this.velY = -fVel * Math.sin(rad) + sVel * Math.cos(rad);
+            let speed = Math.hypot(this.velX, this.velY);
+            let max = this.baseMaxSpeed * (this.boosting ? this.boostPower : 1);
+            if (speed > max) { let scale = max/speed; this.velX*=scale; this.velY*=scale; }
+            this.x += this.velX * dt * 60; this.y += this.velY * dt * 60;
 
-            for (let i = 0; i < count; i++) {
-                const isRed = i % 2 !== 0;
-                const container = isRed ? slotsRed : slotsBlue;
-                const p = players.find(pl => pl.slotIndex === i);
-                const div = document.createElement('div');
-                if (p) {
-                    div.className = `slot filled ${isRed ? 'red' : 'blue'}`;
-                    div.innerHTML = `<div class="flex items-center gap-3"><div class="text-white font-bold text-lg uppercase">${p.username}</div>${p.isHost ? '<span class="text-xxs bg-yellow-500 text-black px-1 rounded font-bold">HOST</span>' : ''}</div><div class="px-2 py-1 rounded text-xs font-bold ${p.isReady ? 'bg-green-500 text-white' : 'bg-yellow-500/50 text-yellow-100'}">${p.isReady ? 'READY' : 'WAITING'}</div>`;
-                } else {
-                    div.className = "slot ai";
-                    div.innerHTML = `<div class="text-gray-400 font-bold flex items-center gap-2"><span>🤖</span> AI BOT</div><div class="text-xs text-gray-500 font-bold border border-gray-600 px-2 py-1 rounded hover:bg-gray-700 hover:text-white">JOIN</div>`;
-                    div.onclick = () => window.claimSlot(i);
+            let mw = this.width/2, mh = this.height/2;
+            if (this.x < mw) { this.x = mw; this.velX *= -0.5; }
+            if (this.x > FIELD_CONSTANTS.CANVAS_WIDTH - mw) { this.x = FIELD_CONSTANTS.CANVAS_WIDTH - mw; this.velX *= -0.5; }
+            if (this.y < mh) { this.y = mh; this.velY *= -0.5; }
+            if (this.y > FIELD_CONSTANTS.CANVAS_HEIGHT - mh) { this.y = FIELD_CONSTANTS.CANVAS_HEIGHT - mh; this.velY *= -0.5; }
+
+            boostPads.forEach((pad, index) => {
+                if (pad.active && Math.hypot(this.x-pad.x, this.y-pad.y) < this.width/2 + pad.radius) {
+                    this.boost = Math.min(100, this.boost + 25);
+                    pad.active = false; pad.cooldown = 5.0;
+                    if (!window.netState.isHost) sendToHost('BOOST_TAKEN', { index: index });
                 }
-                container.appendChild(div);
-            }
-        };
-
-        // --- Helper functions ---
-        function getInitialAngle(x1, y1, x2, y2) {
-            let angleRad = Math.atan2(y1 - y2, x2 - x1);
-            return (angleRad * 180 / Math.PI + 360) % 360;
-        }
-        function assignAIRoles(aiCars) {
-            const roleOrder = ["attacker", "defender", "mid", "attacker", "mid", "defender"];
-            aiCars.sort((a, b) => a.playerId - b.playerId).forEach((ai, index) => {
-                ai.role = roleOrder[index % roleOrder.length] || "attacker";
             });
         }
-        function updateUI() {
-            const sLeft = document.getElementById('score-left');
-            const sRight = document.getElementById('score-right');
-            sLeft.textContent = `${scoreLeft}`;
-            sRight.textContent = `${scoreRight}`;
+        else if (this.isAI && window.netState.isHost) {
+            this.handleAI(dt, ball, cars);
+            let rad = Math.PI * this.angle / 180;
+            let fVel = this.velX*Math.cos(rad) - this.velY*Math.sin(rad);
+            let sVel = this.velX*Math.sin(rad) + this.velY*Math.cos(rad);
+            let throttle = this.aiThrottle;
+            if (throttle !== 0) fVel += throttle * this.baseAcceleration;
+            if (this.boosting) { fVel += this.baseAcceleration * this.boostPower * (throttle || 1); this.boost = Math.max(0, this.boost - 1.0); }
+            fVel *= 0.96; sVel *= (1 - this.baseSideFrictionFactor);
+            this.velX = fVel * Math.cos(rad) + sVel * Math.sin(rad);
+            this.velY = -fVel * Math.sin(rad) + sVel * Math.cos(rad);
+            let speed = Math.hypot(this.velX, this.velY);
+            let max = this.baseMaxSpeed * (this.boosting ? this.boostPower : 1);
+            if (speed > max) { let scale = max/speed; this.velX*=scale; this.velY*=scale; }
+            this.x += this.velX * dt * 60; this.y += this.velY * dt * 60;
 
-            if (endConditionType === 'points') {
-                document.getElementById('game-timer').classList.add('hidden-mode');
+            let mw = this.width/2, mh = this.height/2;
+            if (this.x < mw) { this.x = mw; this.velX *= -0.5; }
+            if (this.x > FIELD_CONSTANTS.CANVAS_WIDTH - mw) { this.x = FIELD_CONSTANTS.CANVAS_WIDTH - mw; this.velX *= -0.5; }
+            if (this.y < mh) { this.y = mh; this.velY *= -0.5; }
+            if (this.y > FIELD_CONSTANTS.CANVAS_HEIGHT - mh) { this.y = FIELD_CONSTANTS.CANVAS_HEIGHT - mh; this.velY *= -0.5; }
+        }
+        else {
+            const data = remoteEntities[this.id];
+            if (data) {
+                // UPDATED: Smoother interpolation
+                this.x += (data.x - this.x) * 0.3; this.y += (data.y - this.y) * 0.3;
+                let d = data.angle - this.angle;
+                while (d < -180) d += 360; while (d > 180) d -= 360;
+                this.angle += d * 0.3;
+                // END UPDATED
+                this.boost = data.boost || 100; this.boosting = data.boosting || false;
             }
-            else if (endConditionType === 'timed') {
-                document.getElementById('game-timer').classList.remove('hidden-mode');
-                let min = Math.floor(gameTimer / 60), sec = Math.floor(gameTimer % 60);
-                const timerEl = document.getElementById('game-timer');
-                timerEl.textContent = `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+        }
+    }
+    handleAI(dt, ball, allCars) {
+        if (!ball) return;
+        this.aiThrottle = 0;
+        if (this.aiStuckState !== 'none') { this.runStuckRoutine(dt, ball); this.aiThrottle = this.throttleDirection; return; }
+        const dx = ball.x - this.x, dy = ball.y - this.y;
+        const targetRad = Math.atan2(-dy, dx);
+        let targetAngle = (targetRad * 180 / Math.PI + 360) % 360;
+        let diff = targetAngle - this.angle;
+        if (diff > 180) diff -= 360; if (diff < -180) diff += 360;
+        
+        // AI uses its own baseRotationSpeed
+        if (diff > this.baseRotationSpeed) this.angle = (this.angle + this.baseRotationSpeed) % 360;
+        else if (diff < -this.baseRotationSpeed) this.angle = (this.angle - this.baseRotationSpeed) % 360;
+        else this.angle = targetAngle;
+        
+        this.throttleDirection = 0;
+        if (Math.abs(diff) < 32) {
+            this.throttleDirection = 1;
+            let rad = Math.PI * this.angle / 180;
+            this.velX += Math.cos(rad) * this.baseAcceleration; this.velY -= Math.sin(rad) * this.baseAcceleration;
+        }
+        this.aiThrottle = this.throttleDirection;
+    }
+    runStuckRoutine(dt, ball) {
+        this.aiStuckStateTimer -= dt;
+        if (this.aiStuckState === 'reversing') { this.throttleDirection = -1; if (this.aiStuckStateTimer <= 0) this.aiStuckState = 'none'; }
+    }
+   
+    draw() {
+        ctx.save(); ctx.translate(this.x, this.y);
+        ctx.save();
+        ctx.rotate(-this.angle * Math.PI / 180);
+       
+        const w = this.width, h = this.height;
+        
+        // --- UPDATED: VISUALS ARE CLIENT-SIDE ---
+        // Find the local player's setting
+        const myUID = window.netState.myId;
+        const me = window.netState.players.find(p => p.userId === myUID);
+        
+        // Default to simple if 'me' isn't found or use their setting
+        const myVisualSetting = (me && me.visualSetting) ? me.visualSetting : window.gameSettings.visuals;
+        const isSimple = myVisualSetting === 'simple';
+        // --- END UPDATED ---
 
-                if (gameTimer <= 10 && gameTimer > 0) {
-                    timerEl.classList.add('countdown');
-                    timerEl.classList.remove('glow-red');
-                    timerEl.innerText = Math.ceil(gameTimer);
-                } else {
-                    timerEl.classList.remove('countdown');
-                    if (gameTimer <= 30) timerEl.classList.add('glow-red');
-                    else timerEl.classList.remove('glow-red');
-                }
+        if (!isSimple) {
+            // --- UPDATED COOL VISUAL V2 ---
+            const wheelW = 6, wheelH = 10;
+            const wheelOffset = 4;
+            // Draw Wheels (Black)
+            ctx.fillStyle = '#111827';
+            ctx.fillRect(-w/2 + 5, -h/2 - wheelOffset, wheelW, wheelH); // Front Left
+            ctx.fillRect(w/2 - 5 - wheelW, -h/2 - wheelOffset, wheelW, wheelH); // Front Right
+            ctx.fillRect(-w/2 + 5, h/2 - wheelH + wheelOffset, wheelW, wheelH); // Rear Left
+            ctx.fillRect(w/2 - 5 - wheelW, h/2 - wheelH + wheelOffset, wheelW, wheelH); // Rear Right
+
+            // Main Body (Team Color)
+            ctx.fillStyle = this.color;
+            ctx.beginPath(); ctx.roundRect(-w/2,-h/2, w, h, 4); ctx.fill();
+            
+            // Racing Stripes (Dual White)
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+            ctx.fillRect(-w/2, -h/2 + 5, w, 4); // Stripe 1
+            ctx.fillRect(-w/2, h/2 - 9, w, 4); // Stripe 2
+            
+            // New Windshield (Angled)
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            ctx.beginPath();
+            ctx.moveTo(w/2 - 17, -h/2 + 3); // Top-left corner (relative to car center)
+            ctx.lineTo(w/2 - 7, -h/2 + 3); // Top-right
+            ctx.lineTo(w/2 - 10, h/2 - 3); // Bottom-right
+            ctx.lineTo(w/2 - 20, h/2 - 3); // Bottom-left
+            ctx.closePath(); ctx.fill();
+            
+            // Headlights
+            ctx.fillStyle = '#FFFF99'; // Pale Yellow
+            ctx.fillRect(w/2 - 6, -h/2 + 4, 6, 5); // Right Headlight
+            ctx.fillRect(w/2 - 6, h/2 - 9, 6, 5); // Left Headlight
+        
+            // Taillights
+            ctx.fillStyle = '#FF0000'; // Red
+            ctx.fillRect(-w/2, -h/2 + 5, 3, 4);
+            ctx.fillRect(-w/2, h/2 - 9, 3, 4);
+
+            if(this.boosting){
+                ctx.fillStyle="#00ffff"; ctx.globalCompositeOperation = 'screen';
+                ctx.beginPath(); ctx.moveTo(-w/2, -5); ctx.lineTo(-w/2-15, 0); ctx.lineTo(-w/2, 5); ctx.fill();
+                ctx.globalCompositeOperation = 'source-over';
             }
+            // --- END UPDATED COOL VISUAL V2 ---
+        } else {
+            // UPDATED: Simple Look (Bright Yellow Windscreen moved forward)
+            ctx.fillStyle = this.color;
+            ctx.beginPath(); ctx.roundRect(-w/2,-h/2, w, h, 4); ctx.fill();
+            // Bright Yellow Windscreen (Moved to x=8, brighter)
+            ctx.fillStyle = '#ffff00';
+            ctx.beginPath(); ctx.roundRect(8, -h/2+3, 8, h-6, 2); ctx.fill();
+            
+            if(this.boosting){
+                ctx.fillStyle="#ffaa00";
+                ctx.beginPath(); ctx.moveTo(-w/2,0); ctx.lineTo(-w/2-(15),-h/4);
+                ctx.lineTo(-w/2-(20),0); ctx.lineTo(-w/2-(15),h/4); ctx.closePath(); ctx.fill();
+            }
+        }
+       
+        ctx.restore();
+        
+        // Boost Bar (Above Car)
+        const barW = 40, barH = 5;
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(-barW/2, -35, barW, barH);
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillRect(-barW/2, -35, barW * (this.boost/100), barH);
 
-            // Update local player boost bar
-            if (localCar) {
-                document.getElementById('boost-fill').style.width = localCar.boost + '%';
-                document.getElementById('boost-bar-container').style.display = 'flex';
+        // Name
+        ctx.fillStyle = 'white'; ctx.font = '10px Inter'; ctx.textAlign = 'center';
+        const p = window.netState.players.find(pl => pl.userId === this.ownerId);
+        // UPDATED: Show player/AI name
+        ctx.fillText(p ? p.username : 'Player', 0, -42);
+        
+        ctx.restore();
+    }
+}
+
+class Ball {
+    constructor(x, y) {
+        this.x=x; this.y=y; this.velX=0; this.velY=0; this.radius=FIELD_CONSTANTS.BALL_RADIUS;
+        this.val = 1;
+    }
+    update(dt) {
+        if (window.netState.isHost) {
+            this.x += this.velX*dt*60; this.y += this.velY*dt*60;
+            // UPDATED: Slower physics (more friction)
+            this.velX *= 0.975; this.velY *= 0.975;
+            const goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT;
+            const goalTop = canvas.height / 2 - goalHeight / 2;
+            const goalBottom = canvas.height / 2 + goalHeight / 2;
+            const inGoalY = this.y >= goalTop - 10 && this.y <= goalBottom + 10;
+            if (this.y<this.radius) { this.y=this.radius; this.velY*=-0.8; }
+            if (this.y>FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius) { this.y=FIELD_CONSTANTS.CANVAS_HEIGHT-this.radius; this.velY*=-0.8; }
+            if (this.x<this.radius && !inGoalY) { this.x=this.radius; this.velX*=-0.8; }
+            if (this.x>FIELD_CONSTANTS.CANVAS_WIDTH-this.radius && !inGoalY) { this.x=FIELD_CONSTANTS.CANVAS_WIDTH-this.radius; this.velX*=-0.8; }
+        } else {
+            const d = remoteEntities['ball'];
+            if(d) {
+                this.x += (d.x - this.x) * 0.3; this.y += (d.y - this.y) * 0.3;
+                if (d.velX !== undefined) this.velX = d.velX;
+                if (d.velY !== undefined) this.velY = d.velY;
+                this.x += this.velX * dt * 0.5; this.y += this.velY * dt * 0.5;
+                this.val = d.val || 1;
+            }
+        }
+    }
+    draw() {
+        if(this.val === 3) ctx.fillStyle = '#ffd700'; else if(this.val === 2) ctx.fillStyle = '#a855f7'; else ctx.fillStyle = '#00fff4';
+        ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI*2); ctx.fill();
+        ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.beginPath(); ctx.arc(this.x-5, this.y-5, 6, 0, Math.PI*2); ctx.fill();
+        if(this.val > 1) { ctx.fillStyle = '#000'; ctx.font = 'bold 14px Inter'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(`x${this.val}`, this.x, this.y); }
+    }
+}
+
+window.initGame = (roomData) => {
+    gameState = 'playing';
+    document.getElementById('app').classList.add('in-game');
+    switchScreen('screen-game');
+    cars = []; boostPads = []; score = {left:0, right:0};
+    document.getElementById('score-left').innerText = '0'; document.getElementById('score-right').innerText = '0';
+    
+    // Timer Visibility Logic
+    const timerBox = document.getElementById('game-timer');
+    if (roomData.type === 'points') {
+        timerBox.classList.add('hidden-mode');
+    } else {
+        timerBox.classList.remove('hidden-mode');
+        gameTimer = roomData.duration || 120;
+    }
+    
+    // NEW PAD LOCATIONS (1 Center, 4 Mid-Corners, 4 Inner)
+    const W = FIELD_CONSTANTS.CANVAS_WIDTH, H = FIELD_CONSTANTS.CANVAS_HEIGHT;
+    const locs = [
+        {x:W/2, y:H/2}, // Center
+        {x:150, y:150}, {x:W-150, y:150}, {x:150, y:H-150}, {x:W-150, y:H-150}, // Corners
+        {x:W/2-100, y:H/2}, {x:W/2+100, y:H/2}, {x:W/2, y:H/2-100}, {x:W/2, y:H/2+100} // Inner Cross
+    ];
+    locs.forEach(p => boostPads.push(new BoostPad(p.x, p.y)));
+
+    const count = roomData.mode === '2v2' ? 4 : (roomData.mode === '3v3' ? 6 : 2);
+    // Use the (now populated) players list
+    const players = window.netState.players;
+
+    for (let i = 0; i < count; i++) {
+        const p = players.find(pl => pl.slotIndex === i);
+        // This 'p' can now be a human or an AI player object
+        const isRed = i % 2 !== 0;
+        const startX = isRed ? W-100 : 100;
+        const startY = H/2 + (Math.floor(i/2) * 80 * (i%4==0?1:-1)) - (count>2?40:0);
+        const angle = isRed ? 180 : 0;
+        
+        let id = p ? p.userId : `orphaned_car_${i}`; // Should always find a 'p' now
+        const newCar = new Car(
+            id, startX, startY, angle, 
+            isRed ? 'right' : 'left', 
+            p && p.userId === window.netState.myId, // isLocal
+            p && p.isAI, // isAI
+            id // ownerId
+        );
+        newCar.resetPos = {x: startX, y: startY, angle: angle};
+        cars.push(newCar);
+        if(newCar.isLocal) localCar = newCar;
+    }
+   
+    ball = new Ball(W/2, H/2);
+    lastTime = Date.now();
+    loop();
+};
+
+window.handleGameStateUpdate = (data) => {
+    if (data.ball) remoteEntities['ball'] = data.ball;
+    if (data.padStates) data.padStates.forEach((cd, i) => { if(boostPads[i]) { boostPads[i].cooldown = cd; boostPads[i].active = (cd <= 0); } });
+    if (data.scores) {
+        document.getElementById('score-left').innerText = data.scores.left;
+        document.getElementById('score-right').innerText = data.scores.right;
+        score = data.scores;
+    }
+    if (data.winner) {
+        if (gameState === 'finished') return;
+        
+        document.getElementById('end-score-blue').innerText = score.left;
+        document.getElementById('end-score-red').innerText = score.right;
+        const title = document.getElementById('result-title');
+        const me = window.netState.players.find(p => p.userId === window.netState.myId);
+        const myTeam = me ? me.team : 'spectator';
+       
+        if (data.winner === 'draw') { title.innerText = "DRAW"; title.className = "text-6xl font-black italic text-white"; }
+        else if (myTeam === 'spectator') { title.innerText = data.winner.toUpperCase() + " WINS"; title.className = "text-6xl font-black italic text-white"; }
+        else {
+             const won = (data.winner === myTeam);
+             title.innerText = won ? "YOU WIN" : "YOU LOSE";
+             title.className = `text-6xl font-black italic ${won ? 'text-yellow-400' : 'text-red-500'}`;
+        }
+       
+        const list = document.getElementById('scoreboard-list');
+        list.innerHTML = '';
+        let finalPlayers = [...window.netState.players];
+        finalPlayers.sort((a, b) => (b.stats?.goals||0) - (a.stats?.goals||0));
+
+        finalPlayers.forEach((p, index) => {
+            // UPDATED: Simpler check, only show players who were in a slot
+            if (p.slotIndex === -1) return;
+            
+            const row = document.createElement('div');
+            row.className = 'scoreboard-row hover:bg-white/5';
+            row.innerHTML = `<div class="flex items-center font-bold text-white"><span>${p.username}</span>${index===0?'<span class="mvp-tag">MVP</span>':''}</div>
+            <div class="text-center font-mono font-bold text-yellow-400">${p.stats?.goals||0}</div>
+            <div class="text-right font-mono font-bold text-gray-400">${p.stats?.saves||0}</div>`;
+            list.appendChild(row);
+        });
+
+        document.getElementById('btn-host-restart').style.display = window.netState.isHost ? 'block' : 'none';
+        gameState = 'finished';
+        switchScreen('screen-result');
+    }
+    if (data.timer !== undefined) if (data.forceSync || Math.abs(gameTimer - data.timer) > 10) gameTimer = data.timer;
+    if (data.paused !== undefined) document.getElementById('modal-pause').style.display = data.paused ? 'flex' : 'none';
+};
+
+window.handleRemoteEntityUpdate = (data) => { Object.keys(data).forEach(k => remoteEntities[k] = data[k]); };
+
+function loop() {
+    requestAnimationFrame(loop);
+    if (gameState !== 'playing') return;
+    const now = Date.now(), dt = (now - lastTime) / 1000;
+    lastTime = now;
+    drawField(ctx, canvas);
+    const isPaused = document.getElementById('modal-pause').style.display === 'flex';
+
+    if (!isPaused) {
+        if (window.hostConfig.type === 'timed') {
+            gameTimer -= dt;
+            if (gameTimer < 0) gameTimer = 0;
+            const tBox = document.getElementById('game-timer');
+            if (gameTimer <= 10 && gameTimer > 0) {
+                tBox.className = 'timer-box countdown';
+                tBox.innerText = Math.ceil(gameTimer);
             } else {
-                document.getElementById('boost-bar-container').style.display = 'none';
+                tBox.className = 'timer-box';
+                const m = Math.floor(gameTimer/60), s = Math.floor(gameTimer%60);
+                tBox.innerText = `${m}:${s<10?'0'+s:s}`;
             }
         }
 
-
-        // --- GAME MECHANICS ---
-
-        function drawField(ctx, canvas) {
-            ctx.fillStyle = COLOR_FIELD;
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-            let goalHeight = GOAL_HEIGHT;
-            let playerGoalTop = canvas.height / 2 - goalHeight / 2;
-            let playerGoalBottom = canvas.height / 2 + goalHeight / 2;
-
-            ctx.fillStyle = 'rgba(0, 102, 204, 0.2)';
-            ctx.fillRect(0, playerGoalTop, 15, goalHeight);
-            ctx.fillStyle = 'rgba(204, 0, 0, 0.2)';
-            ctx.fillRect(canvas.width - 15, playerGoalTop, 15, goalHeight);
-
-            ctx.strokeStyle = "#dcdcdc"; ctx.lineWidth = 4;
-            ctx.beginPath(); ctx.moveTo(canvas.width / 2, 0); ctx.lineTo(canvas.width / 2, canvas.height); ctx.stroke();
-            ctx.beginPath(); ctx.arc(canvas.width / 2, canvas.height / 2, 80, 0, Math.PI * 2); ctx.stroke();
-
-            ctx.strokeStyle = COLOR_BLUE; ctx.lineWidth = GOAL_LINE_WIDTH;
-            ctx.beginPath(); ctx.moveTo(0, playerGoalTop); ctx.lineTo(0, playerGoalBottom); ctx.stroke();
-            ctx.strokeStyle = COLOR_RED;
-            ctx.beginPath(); ctx.moveTo(canvas.width, playerGoalTop); ctx.lineTo(canvas.width, playerGoalBottom); ctx.stroke();
-
-            boostPads.forEach(pad => pad.draw());
-        }
-
-        function checkGoal(ball, canvas) {
-            let goalHeight = GOAL_HEIGHT;
-            let goalTop = canvas.height / 2 - goalHeight / 2;
-            let goalBottom = canvas.height / 2 + goalHeight / 2;
-
-            if (ball.y > goalTop && ball.y < goalBottom && ball.x - ball.radius <= 0) {
-                return 'right'; // Red scores
-            }
-            if (ball.y > goalTop && ball.y < goalBottom && ball.x + ball.radius >= canvas.width) {
-                return 'left'; // Blue scores
-            }
-            return null;
-        }
-
-        // --- ENTITIES ---
-        class BoostPad {
-            constructor(x, y, radius = 12, isSpecial = false) {
-                this.x = x; this.y = y; this.radius = radius;
-                this.isSpecial = isSpecial;
-                this.active = true; this.cooldownTimer = 0;
-            }
-            update(deltaTime) {
-                if (!this.active) {
-                    this.cooldownTimer -= deltaTime;
-                    if (this.cooldownTimer <= 0) this.active = true;
-                }
-            }
-            draw() {
-                ctx.save();
-                if (!this.active) ctx.globalAlpha = 0.3;
-                let outerColor = this.isSpecial ? "#d946ef" : "#fbbf24";
-                let innerColor = this.isSpecial ? "#a21caf" : "#f59e42";
-
-                ctx.strokeStyle = outerColor; ctx.lineWidth = 3;
-                ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.stroke();
-                ctx.fillStyle = innerColor; ctx.beginPath(); ctx.arc(this.x, this.y, this.radius - 7, 0, Math.PI * 2); ctx.fill();
-                ctx.restore();
-            }
-            checkCollision(car) {
-                if (!this.active) return false;
-                return Math.hypot(this.x - car.x, this.y - car.y) < this.radius + (CAR_WIDTH * car.sizeMultiplier / 2);
-            }
-            consume(car) {
-                if (!this.active) return;
-                this.active = false; this.cooldownTimer = 3.0;
-
-                // Only refill car if it's passed (i.e., not a network update)
-                if (car) {
-                    let baseRefill = this.isSpecial ? 50 : 25;
-                    car.refillBoost(baseRefill);
-                }
+        if (window.netState.isHost) {
+            if (window.hostConfig.type === 'timed' && gameTimer <= 0) {
+                let winner = score.left > score.right ? 'left' : (score.right > score.left ? 'right' : 'draw');
+                const p = { winner, scores: score, timer: 0, paused: false, forceSync: true };
+                window.handleGameStateUpdate(p); broadcastToClients('GAME_UPDATE', p); return;
             }
         }
 
-        class Car {
-            constructor(x, y, color, controls, team_side, player_id, initial_angle, ai = false, difficulty = 3, role = "attacker", ownerId, isLocal) {
-                this.x = x; this.y = y; this.color = color; this.team_side = team_side; this.controls = controls;
-                this.playerId = player_id; this.angle = initial_angle; this.velX = 0; this.velY = 0; this.speed = 0;
-                this.ownerId = ownerId; // Link to network ID
-                this.isLocal = isLocal; // Is this car me?
-
-                this.baseAcceleration = 0.3; this.baseMaxSpeed = 5.0;
-                this.baseRotationSpeed = 4.5; this.baseSideFrictionFactor = 0.05;
-                this.boostPower = 1.8; this.boostUsage = 1.2; this.maxBoost = 100; this.boost = this.maxBoost; this.boosting = false;
-                this.mass = 1.0;
-
-                this.throttleDirection = 0;
-                this.ai = ai; this.difficulty = difficulty; this.role = role;
-                this.isStunned = false;
-                this.isFriendlyAI = team_side === 'left' && ai;
-                this.sizeMultiplier = 1.0;
-                this.widthMultiplier = 1.0;
-                this.lengthMultiplier = 1.0;
-                this.rotationSpeed = this.baseRotationSpeed * playerSettings.sensitivity;
-
-                this.stuckInCornerTimer = 0;
-                this.aiStuckState = 'none';
-                this.aiStuckStateTimer = 0;
-                this.stuckThresholdDist = 60 + Math.random() * 30;
-
-                this.resetPos = { x, y, angle: initial_angle };
-            }
-
-            handleInput(deltaTime) {
-                if (this.ai) {
-                    // Only Host runs AI
-                    if (window.netState.isHost) this.handleAI(deltaTime);
-                    return;
-                }
-                if (this.isStunned) return;
-
-                this.throttleDirection = 0; let accelerationForce = 0;
-
-                // Player 1 (localCar) is the only one that can use joystick
-                const joyInput = (this.playerId === 1) ? joystickInputs[1] : null;
-
-                if (isMobileMode && joyInput && joyInput.active) {
-                    let targetAngleRad = joyInput.angle;
-                    let targetAngleDeg = (-targetAngleRad * 180 / Math.PI + 360) % 360;
-
-                    let angleDiff = targetAngleDeg - this.angle;
-                    if (angleDiff > 180) angleDiff -= 360;
-                    if (angleDiff < -180) angleDiff += 360;
-
-                    let rotSpeed = this.rotationSpeed * 1.5;
-
-                    if (angleDiff > rotSpeed) this.angle = (this.angle + rotSpeed) % 360;
-                    else if (angleDiff < -rotSpeed) this.angle = (this.angle - rotSpeed) % 360;
-                    else this.angle = targetAngleDeg;
-
-                    accelerationForce = this.baseAcceleration;
-                    this.throttleDirection = 1;
-
-                } else {
-                    // Keyboard Logic
-                    const k = playerSettings.keybinds[0]; // Always use Set 0 for local player
-                    if (keys[k.left]) this.angle = (this.angle + this.rotationSpeed) % 360;
-                    if (keys[k.right]) this.angle = (this.angle - this.rotationSpeed) % 360;
-
-                    if (keys[k.up]) { accelerationForce = this.baseAcceleration; this.throttleDirection = 1; }
-                    if (keys[k.down]) {
-                        let isBraking = keys[k.down] && Math.abs(this.speed) > 0.1;
-                        if (isBraking && this.speed > 0.1) accelerationForce = -this.baseAcceleration * 4.0;
-                        else accelerationForce = -this.baseAcceleration * 0.7;
-                        this.throttleDirection = -1;
-                    }
-                }
-
-                if (accelerationForce !== 0) {
-                    let rad = Math.PI * this.angle / 180;
-                    this.velX += Math.cos(rad) * accelerationForce; this.velY -= Math.sin(rad) * accelerationForce;
-                }
-
-                // Boost Logic: Check bound key AND hardcoded ShiftRight
-                const k = playerSettings.keybinds[0];
-                let boostActive = keys[k.boost];
-                if (keys['ShiftRight']) boostActive = true; // FIX: Force Right Shift support
-
-                this.boosting = boostActive && this.boost > 0;
-            }
-
-            handleAI(deltaTime) {
-                if (!ball || this.isStunned) return;
-
-                let targetX, targetY;
-                let prediction = 0;
-
-                // --- Improved AI Logic ---
-                // 1. Determine Target based on Role
-                if (this.role === 'attacker') {
-                    // Predict ball position slightly
-                    prediction = 15;
-                    targetX = ball.x + ball.velX * (deltaTime * prediction);
-                    targetY = ball.y + ball.velY * (deltaTime * prediction);
-                } else if (this.role === 'defender') {
-                    // Stay between ball and goal
-                    let goalX = this.isFriendlyAI ? 0 : canvas.width;
-                    let goalY = canvas.height / 2;
-
-                    // If ball is on our side, rush it. If not, wait near goal.
-                    let distToOwnGoal = Math.abs(ball.x - goalX);
-
-                    if (distToOwnGoal < canvas.width * 0.4) {
-                        // Attack if close
-                        targetX = ball.x;
-                        targetY = ball.y;
+        boostPads.forEach(p => { p.update(dt); p.draw(); });
+        ball.update(dt);
+        
+        cars.forEach(c => {
+            c.update(dt); c.draw();
+            // Collision physics
+            if (c.isLocal || (window.netState.isHost && c.isAI)) {
+                const dx = ball.x - c.x, dy = ball.y - c.y, dist = Math.hypot(dx, dy);
+                if (dist < FIELD_CONSTANTS.BALL_RADIUS + c.width/2) {
+                    const angle = Math.atan2(dy, dx), overlap = (FIELD_CONSTANTS.BALL_RADIUS + c.width/2) - dist;
+                    c.x -= Math.cos(angle) * overlap; c.y -= Math.sin(angle) * overlap;
+                    // UPDATED: Softer hit
+                    c.velX -= Math.cos(angle) * 4; c.velY -= Math.sin(angle) * 4;
+                    
+                    // Save Detection Logic
+                    let isSave = false;
+                    const dangerDist = 250;
+                    if (c.team === 'left') {
+                        if (ball.x < dangerDist && ball.velX < 0 && Math.cos(angle) > 0) isSave = true;
                     } else {
-                        // Defend
-                        targetX = (ball.x + goalX) / 2;
-                        targetY = ball.y * 0.5 + goalY * 0.5;
-                        // Clamp Y
-                        targetY = Math.max(canvas.height / 2 - 150, Math.min(canvas.height / 2 + 150, targetY));
+                        if (ball.x > FIELD_CONSTANTS.CANVAS_WIDTH - dangerDist && ball.velX > 0 && Math.cos(angle) < 0) isSave = true;
                     }
-                } else {
-                    // Midfielder / Default
-                    targetX = ball.x;
-                    targetY = ball.y;
-                }
-
-                // 2. Steering Logic
-                const dx = targetX - this.x;
-                const dy = targetY - this.y;
-                const dist = Math.hypot(dx, dy);
-
-                // Calculate desired angle
-                const targetAngleRad = Math.atan2(-dy, dx);
-                let targetAngle = (targetAngleRad * 180 / Math.PI + 360) % 360;
-
-                let angleDiff = targetAngle - this.angle;
-                if (angleDiff > 180) angleDiff -= 360;
-                if (angleDiff < -180) angleDiff += 360;
-
-                // Turn
-                let turnAmount = this.rotationSpeed;
-
-                if (angleDiff > turnAmount) this.angle = (this.angle + turnAmount) % 360;
-                else if (angleDiff < -turnAmount) this.angle = (this.angle - turnAmount) % 360;
-                else this.angle = targetAngle;
-
-                // 3. Throttle & Boost Logic
-                this.throttleDirection = 0;
-
-                // If we are facing roughly the right way, gas it
-                if (Math.abs(angleDiff) < 80) {
-                    this.throttleDirection = 1;
-                } else if (Math.abs(angleDiff) > 120 && dist < 200) {
-                    this.throttleDirection = 0.5; // Slow forward to turn
-                }
-
-                // Boost if aligned and far away
-                this.boosting = (Math.abs(angleDiff) < 10 && dist > 200 && this.boost > 10);
-
-                // Anti-Stuck (Simple)
-                if (this.speed < 0.5 && this.throttleDirection !== 0) {
-                    this.aiStuckStateTimer += deltaTime;
-                    if (this.aiStuckStateTimer > 1.0) {
-                        // Reverse and turn
-                        this.throttleDirection = -1;
-                        this.angle += 5;
-                    }
-                } else {
-                    this.aiStuckStateTimer = 0;
-                }
-            }
-
-            move(deltaTime) {
-                if (!this.isLocal) {
-                    return;
-                }
-
-                let rad = Math.PI * this.angle / 180;
-                let fVel = this.velX * Math.cos(rad) - this.velY * Math.sin(rad);
-                let sVel = this.velX * Math.sin(rad) + this.velY * Math.cos(rad);
-
-                sVel *= (1 - this.baseSideFrictionFactor);
-                fVel *= 0.96;
-
-                if (this.boosting && this.boost > 0 && this.throttleDirection !== 0) {
-                    let boostForce = this.baseAcceleration * this.boostPower * 1.5;
-                    fVel += boostForce * this.throttleDirection;
-                    this.boost -= this.boostUsage * deltaTime * PHYSICS_TICK_RATE;
-                    if (this.boost < 0) { this.boost = 0; this.boosting = false; }
-                }
-
-                this.velX = fVel * Math.cos(rad) + sVel * Math.sin(rad);
-                this.velY = -fVel * Math.sin(rad) + sVel * Math.cos(rad);
-
-                this.speed = Math.hypot(this.velX, this.velY);
-                let maxSpeed = this.baseMaxSpeed * (this.boosting ? this.boostPower : 1);
-                if (this.speed > maxSpeed) { let sc = maxSpeed / this.speed; this.velX *= sc; this.velY *= sc; }
-
-                this.x += this.velX * deltaTime * PHYSICS_TICK_RATE;
-                this.y += this.velY * deltaTime * PHYSICS_TICK_RATE;
-
-                let w = CAR_WIDTH * this.sizeMultiplier * this.lengthMultiplier;
-                let h = CAR_HEIGHT * this.sizeMultiplier * this.widthMultiplier;
-                let marginW = w / 2; let marginH = h / 2;
-
-                if (this.x < marginW) { this.x = marginW; this.velX *= -0.5; }
-                if (this.x > canvas.width - marginW) { this.x = canvas.width - marginW; this.velX *= -0.5; }
-                if (this.y < marginH) { this.y = marginH; this.velY *= -0.5; }
-                if (this.y > canvas.height - marginH) { this.y = canvas.height - marginH; this.velY *= -0.5; }
-
-                boostPads.forEach((pad, index) => {
-                    if (pad.checkCollision(this)) {
-                        pad.consume(this);
-                        if (!window.netState.isHost) {
-                            sendToHost('BOOST_TAKEN', { index: index });
-                        } else {
-                            broadcastToClients('PAD_CONSUMED', { index: index });
-                        }
-                    }
-                });
-            }
-
-            draw() {
-                ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(-Math.PI * this.angle / 180);
-
-                let w = CAR_WIDTH * this.sizeMultiplier * this.lengthMultiplier;
-                let h = CAR_HEIGHT * this.sizeMultiplier * this.widthMultiplier;
-
-                let displayColor = this.color;
-                if (this.isFriendlyAI) displayColor = '#00cccc';
-
-                ctx.fillStyle = displayColor;
-                ctx.beginPath(); ctx.roundRect(-w / 2, -h / 2, w, h, 8 * this.sizeMultiplier); ctx.fill();
-                ctx.fillStyle = 'yellow';
-                ctx.beginPath(); ctx.roundRect(w / 2 - (10 * this.sizeMultiplier), -h / 2 + (5 * this.sizeMultiplier), 8 * this.sizeMultiplier, h - (10 * this.sizeMultiplier), 2 * this.sizeMultiplier); ctx.fill();
-
-                if (this.boosting) {
-                    ctx.fillStyle = "#ffaa00";
-                    ctx.beginPath(); ctx.moveTo(-w / 2, 0); ctx.lineTo(-w / 2 - (15 * this.sizeMultiplier), -h / 4);
-                    ctx.lineTo(-w / 2 - (20 * this.sizeMultiplier), 0); ctx.lineTo(-w / 2 - (15 * this.sizeMultiplier), h / 4); ctx.closePath(); ctx.fill();
-                }
-                ctx.restore();
-
-                const p = window.netState.players.find(pl => pl.userId === this.ownerId);
-                const label = this.ai ? `AI (${this.role.charAt(0)})` : (p ? p.username : 'Player');
-                const labelY = this.y - h / 2 - 15, barWidth = 40, barHeight = 6, bpct = this.boost / this.maxBoost;
-                ctx.fillStyle = this.ai ? (this.isFriendlyAI ? '#00cccc' : COLOR_RED) : COLOR_BLUE;
-                ctx.font = '12px Inter'; ctx.textAlign = 'center';
-                ctx.fillText(label.toUpperCase(), this.x, labelY - 5);
-                ctx.fillStyle = '#1f2937';
-                ctx.beginPath(); ctx.roundRect(this.x - barWidth / 2, labelY, barWidth, barHeight, 3); ctx.fill();
-                let grad = ctx.createLinearGradient(this.x - barWidth / 2, 0, this.x - barWidth / 2 + barWidth, 0);
-                grad.addColorStop(0, bpct < 0.3 ? '#ef4444' : '#f97316'); grad.addColorStop(1, '#f97316');
-                ctx.fillStyle = grad;
-                ctx.beginPath(); ctx.roundRect(this.x - barWidth / 2, labelY, barWidth * bpct, barHeight, 3); ctx.fill();
-            }
-
-            refillBoost(amount) {
-                this.boost = Math.min(this.maxBoost, this.boost + amount);
-            }
-
-            reset() {
-                this.x = this.resetPos.x; this.y = this.resetPos.y; this.angle = this.resetPos.angle;
-                this.velX = 0; this.velY = 0; this.speed = 0; this.boost = this.maxBoost;
-            }
-        }
-
-        class Ball {
-            constructor(x, y, radius) {
-                this.x = x; this.y = y; this.radius = radius; this.color = COLOR_CYAN;
-                this.velX = 0; this.velY = 0;
-                // INCREASED MAX SPEED (was 35)
-                this.maxSpeed = 45;
-            }
-            move(deltaTime) {
-                // Only host moves ball
-                if (window.netState.isHost) {
-                    this.velX *= 0.98; this.velY *= 0.98;
-                    let speed = Math.hypot(this.velX, this.velY);
-                    if (speed > this.maxSpeed) { let sc = this.maxSpeed / speed; this.velX *= sc; this.velY *= sc; }
-                    this.x += this.velX * deltaTime * PHYSICS_TICK_RATE;
-                    this.y += this.velY * deltaTime * PHYSICS_TICK_RATE;
-
-                    let bMargin = this.radius;
-                    // INCREASED BOUNCINESS (was -0.9)
-                    if (this.x < bMargin) { this.x = bMargin; this.velX *= -0.95; }
-                    else if (this.x > canvas.width - bMargin) { this.x = canvas.width - bMargin; this.velX *= -0.95; }
-                    if (this.y < bMargin) { this.y = bMargin; this.velY *= -0.95; }
-                    else if (this.y > canvas.height - bMargin) { this.y = canvas.height - bMargin; this.velY *= -0.95; }
-                } else {
-                    // Client lerps ball
-                    if (remoteBallData) {
-                        this.x += (remoteBallData.x - this.x) * 0.4;
-                        this.y += (remoteBallData.y - this.y) * 0.4;
-                        this.velX = remoteBallData.velX;
-                        this.velY = remoteBallData.velY;
-                        // Simple prediction
-                        this.x += this.velX * deltaTime * PHYSICS_TICK_RATE * 0.5;
-                        this.y += this.velY * deltaTime * PHYSICS_TICK_RATE * 0.5;
+                    
+                    // UPDATED: Softer hit
+                    ball.velX += Math.cos(angle) * 12; ball.velY += Math.sin(angle) * 12;
+                    
+                    if (!window.netState.isHost && c.isLocal) {
+                        sendToHost('BALL_HIT', { x: ball.x, y: ball.y, velX: ball.velX, velY: ball.velY, isSave });
+                    } else if (window.netState.isHost) {
+                         const p = window.netState.players.find(pl => pl.userId === c.ownerId);
+                         if (p) {
+                             if(isSave) p.stats.saves = (p.stats.saves||0)+1;
+                             else p.stats.hits = (p.stats.hits||0)+1;
+                         }
                     }
                 }
-            }
-            draw() {
-                ctx.fillStyle = this.color;
-                ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fill();
-                ctx.fillStyle = 'rgba(255,255,255,0.5)';
-                ctx.beginPath(); ctx.arc(this.x - 5, this.y - 5, this.radius / 2, 0, Math.PI * 2); ctx.fill();
-            }
-            reset() {
-                this.x = canvas.width / 2;
-                this.y = canvas.height / 2 + (Math.random() * 200 - 100);
-                this.velX = 0; this.velY = 0;
-            }
-        }
-
-        // --- Collision Functions ---
-        function checkCarBallCollision(car, ball) {
-            let dx = ball.x - car.x, dy = ball.y - car.y;
-            let collisionRadius = BALL_RADIUS + (CAR_WIDTH * car.sizeMultiplier * 0.5);
-            let dist = Math.hypot(dx, dy);
-            if (dist < collisionRadius) {
-                let impulseAngle = Math.atan2(dy, dx), carSpeed = car.speed, baseForce = 1.4; // Increased baseForce
-                let force = baseForce + carSpeed * 1.7 * (car.boosting ? car.boostPower : 1); // Increased slightly
-                force *= car.mass;
-
-                ball.velX += Math.cos(impulseAngle) * force; ball.velY += Math.sin(impulseAngle) * force;
-
-                let recoil = 1.0 / car.mass;
-                car.velX -= Math.cos(impulseAngle) * force * 0.5 * recoil;
-                car.velY -= Math.sin(impulseAngle) * force * 0.5 * recoil;
-
-                let overlap = collisionRadius - dist;
-                if (overlap > 0) { ball.x += Math.cos(impulseAngle) * overlap; ball.y += Math.sin(impulseAngle) * overlap; }
-            }
-        }
-
-        function checkCarCarCollision(car1, car2) {
-            let radius1 = (CAR_WIDTH * car1.sizeMultiplier / 2) * 0.9;
-            let radius2 = (CAR_WIDTH * car2.sizeMultiplier / 2) * 0.9;
-            let collisionDistance = radius1 + radius2;
-            let dx = car2.x - car1.x, dy = car2.y - car1.y;
-            let dist = Math.hypot(dx, dy);
-
-            if (dist < collisionDistance) {
-                let angle = Math.atan2(dy, dx);
-                let overlap = collisionDistance - dist;
-                let sepX = Math.cos(angle) * (overlap / 2 + 0.5), sepY = Math.sin(angle) * (overlap / 2 + 0.5);
-                car1.x -= sepX; car1.y -= sepY; car2.x += sepX; car2.y += sepY;
-
-                let v1 = car1.velX * Math.cos(angle) + car1.velY * Math.sin(angle);
-                let v2 = car2.velX * Math.cos(angle) + car2.velY * Math.sin(angle);
-                let m1 = car1.mass, m2 = car2.mass;
-                let v1Final = (v1 * (m1 - m2) + 2 * m2 * v2) / (m1 + m2);
-                let v2Final = (v2 * (m2 - m1) + 2 * m1 * v1) / (m1 + m2);
-
-                car1.velX += (v1Final - v1) * Math.cos(angle); car1.velY += (v1Final - v1) * Math.sin(angle);
-                car2.velX += (v2Final - v2) * Math.cos(angle); car2.velY += (v2Final - v2) * Math.sin(angle);
-            }
-        }
-
-        // --- handleGoal function ---
-        function handleGoal(scoringTeam, scoredBall) {
-            if (scoringTeam === 'left') {
-                scoreLeft++;
-            }
-            else if (scoringTeam === 'right') {
-                scoreRight++;
-            }
-
-            // Reset all entities
-            cars.forEach(c => c.reset());
-            ball.reset();
-
-            // Host: Check for game end
-            if (window.netState.isHost) {
-                let winner = null;
-                if (endConditionType === 'points' && (scoreLeft >= targetScore || scoreRight >= targetScore)) {
-                    winner = scoreLeft >= targetScore ? 'left' : 'right';
-                } else if (endConditionType === 'timed' && gameTimer <= 0) {
-                    winner = scoreLeft > scoreRight ? 'left' : (scoreRight > scoreLeft ? 'right' : 'draw');
-                }
-
-                // Broadcast new state
-                const gameStatePayload = {
-                    scores: { left: scoreLeft, right: scoreRight },
-                    timer: gameTimer,
-                    winner: winner,
-                    forceSync: true
-                };
-                broadcastToClients('GAME_UPDATE', gameStatePayload);
-
-                // Broadcast entity resets
-                let entityData = { 'ball': { x: ball.x, y: ball.y, velX: 0, velY: 0 } };
-                cars.forEach(c => {
-                    entityData[c.ownerId] = { x: c.resetPos.x, y: c.resetPos.y, angle: c.resetPos.angle, boost: c.maxBoost, boosting: false };
-                });
-                broadcastToClients('ENTITY_UPDATE', entityData);
-
-                if (winner) {
-                    handleGameEnd(winner); // Host ends game locally too
-                }
-            }
-        }
-
-        // --- handleGameEnd (called by packet or host) ---
-        function handleGameEnd(winner) {
-            if (gameState === 'finished') return;
-            gameState = 'finished';
-            if (animationFrameId) cancelAnimationFrame(animationFrameId);
-
-            const myUid = window.netState.myId;
-            const me = window.netState.players.find(p => p.userId === myUid);
-            const myTeam = me ? me.team : 'spectator';
-            const title = document.getElementById('result-title');
-
-            document.getElementById('end-score-blue').innerText = scoreLeft;
-            document.getElementById('end-score-red').innerText = scoreRight;
-
-            if (winner === 'draw') {
-                title.innerText = "DRAW";
-                title.className = "text-8xl font-black italic tracking-tighter mb-2 text-white";
-            } else {
-                const won = (winner === myTeam);
-                title.innerText = won ? "YOU WIN" : "YOU LOSE";
-                const colorClass = winner === 'left' ? 'text-blue-500' : 'text-red-500';
-                title.className = `text-8xl font-black italic tracking-tighter mb-2 ${colorClass}`;
-            }
-
-            switchScreen('screen-result');
-        }
-
-
-        // --- initGame ---
-        window.initGame = (roomData) => {
-            gameState = 'playing';
-            gameMode = roomData.mode;
-            endConditionType = roomData.type;
-            timeLimitSeconds = roomData.duration;
-            targetScore = roomData.scoreTarget;
-            gameTimer = timeLimitSeconds;
-
-            document.getElementById('app').classList.add('in-game');
-            switchScreen('screen-game');
-            cars = [];
-            boostPads = [];
-            scoreLeft = 0; scoreRight = 0;
-
-            updateUI();
-
-            // Setup Boost Pads
-            boostPads = [
-                new BoostPad(canvas.width * 0.5, canvas.height * 0.25), new BoostPad(canvas.width * 0.5, canvas.height * 0.75),
-                new BoostPad(canvas.width * 0.25, canvas.height * 0.5), new BoostPad(canvas.width * 0.75, canvas.height * 0.5),
-                new BoostPad(canvas.width * 0.5, canvas.height * 0.5),
-                new BoostPad(canvas.width * 0.1, canvas.height * 0.12), new BoostPad(canvas.width * 0.9, canvas.height * 0.12),
-                new BoostPad(canvas.width * 0.1, canvas.height * 0.88), new BoostPad(canvas.width * 0.9, canvas.height * 0.88),
-            ];
-
-            // Setup Ball
-            ball = new Ball(canvas.width / 2, canvas.height / 2, BALL_RADIUS);
-            ball.reset();
-
-            // Setup Cars based on Lobby
-            const count = roomData.mode === '2v2' ? 4 : (roomData.mode === '3v3' ? 6 : 2);
-            const players = window.netState.players;
-            let aiCars = [];
-
-            for (let i = 0; i < count; i++) {
-                const p = players.find(pl => pl.slotIndex === i);
-                const isRed = i % 2 !== 0;
-
-                const startX = isRed ? 900 : 100;
-                const startY = 300 + (Math.floor(i / 2) * 80 * (i % 4 == 0 ? 1 : -1));
-                const angle = isRed ? 180 : 0;
-                const team_side = isRed ? 'right' : 'left';
-                const color = isRed ? COLOR_RED : COLOR_BLUE;
-
-                let newCar;
-                if (p) {
-                    // It's a Human Player
-                    const isMe = p.userId === window.netState.myId;
-                    const playerId = isMe ? 1 : i + 2;
-                    const controls = playerSettings.keybinds[playerId - 1] || {};
-
-                    newCar = new Car(startX, startY, color, controls, team_side, playerId, angle, false, 0, "attacker", p.userId, isMe);
-                    if (isMe) localCar = newCar;
-
-                } else {
-                    // It's an AI Bot
-                    const playerId = 10 + i; // AI player ID
-                    newCar = new Car(startX, startY, color, {}, team_side, playerId, angle, true, 3, "attacker", `${window.netState.roomId}_ai_${i}`, false);
-                    aiCars.push(newCar);
-                }
-                cars.push(newCar);
-            }
-
-            assignAIRoles(aiCars);
-
-            lastTime = performance.now();
-            if (animationFrameId) cancelAnimationFrame(animationFrameId);
-            animationFrameId = requestAnimationFrame(gameLoop);
-        };
-
-
-        // --- gameLoop ---
-        function update(deltaTime) {
-            if (endConditionType === 'timed' && window.netState.isHost) {
-                gameTimer = Math.max(0, gameTimer - deltaTime);
-            }
-
-            // 1. Handle Input (Local Player + Host AI)
-            cars.forEach(car => {
-                if (car.isLocal || (car.ai && window.netState.isHost)) {
-                    car.handleInput(deltaTime);
-                }
-            });
-
-            // 2. Move Entities (Local Player + Host AI + Host Ball)
-            cars.forEach(car => {
-                if (car.isLocal || (car.ai && window.netState.isHost)) {
-                    car.move(deltaTime);
-                }
-            });
-            if (window.netState.isHost) {
-                ball.move(deltaTime);
-            } else {
-                ball.move(deltaTime); // Client runs this for prediction/lerping
-            }
-
-            boostPads.forEach(pad => pad.update(deltaTime));
-
-            // 3. Host-side Physics & Goal Check
-            if (window.netState.isHost) {
-                cars.forEach(car => checkCarBallCollision(car, ball));
-                for (let i = 0; i < cars.length; i++) {
-                    for (let j = i + 1; j < cars.length; j++) {
-                        checkCarCarCollision(cars[i], cars[j]);
-                    }
-                }
-
-                let scoringTeam = checkGoal(ball, canvas);
-                if (scoringTeam) {
-                    handleGoal(scoringTeam, ball); // This handles game end & broadcasts
-                    return; // Skip rest of update if goal happened
-                }
-
-                // Check for timer end
-                if (endConditionType === 'timed' && gameTimer <= 0) {
-                    let winner = scoreLeft > scoreRight ? 'left' : (scoreRight > scoreLeft ? 'right' : 'draw');
-                    handleGoal(winner === 'left' ? 'left_win' : (winner === 'right' ? 'right_win' : 'draw_win'), ball); // Custom states to force end
-                }
-            }
-
-            // 4. Network Sync
-            const nowMs = Date.now();
-            if (nowMs - window.netState.lastUpdateSent > 33) { // ~30 FPS updates
-                window.netState.lastUpdateSent = nowMs;
-
-                // Clients send their Car
-                if (!window.netState.isHost && localCar) {
-                    const myUpdateData = {};
-                    myUpdateData[localCar.ownerId] = {
-                        x: localCar.x, y: localCar.y,
-                        angle: localCar.angle, boost: localCar.boost,
-                        boosting: localCar.boosting
-                    };
-                    sendToHost('ENTITY_UPDATE', myUpdateData);
-                }
-
-                // Host sends EVERYTHING
-                if (window.netState.isHost) {
-                    const entityPayload = {};
-
-                    // Add all cars (player and AI)
-                    cars.forEach(c => {
-                        entityPayload[c.ownerId] = {
-                            x: c.x, y: c.y,
-                            angle: c.angle, boost: c.boost,
-                            boosting: c.boosting
-                        };
-                    });
-
-                    // Add Ball
-                    entityPayload['ball'] = {
-                        x: ball.x, y: ball.y,
-                        velX: ball.velX, velY: ball.velY,
-                    };
-
-                    broadcastToClients('ENTITY_UPDATE', entityPayload);
-
-                    // Send Game Logic (Timer + Scores) separately
-                    const gameStatePayload = {
-                        scores: { left: scoreLeft, right: scoreRight },
-                        timer: gameTimer,
-                        paused: false
-                    };
-                    broadcastToClients('GAME_UPDATE', gameStatePayload);
-                }
-            }
-        }
-
-        function gameLoop(currentTime) {
-            if (gameState !== 'playing') {
-                if (animationFrameId) cancelAnimationFrame(animationFrameId);
-                return;
-            }
-
-            animationFrameId = requestAnimationFrame(gameLoop);
-
-            const deltaTime = (currentTime - lastTime) / 1000;
-            lastTime = currentTime;
-
-            // Run update logic
-            update(deltaTime);
-
-            // Draw visuals
-            drawField(ctx, canvas);
-            cars.forEach(car => car.draw());
-            ball.draw();
-
-            // Update HUD
-            updateUI();
-        }
-
-        // --- Mobile Control Functions ---
-        function setupJoystick(areaId, baseId, stickSelector, playerId, invertY = false, visibleIdle = false, defaultPos = { bottom: '30px', left: '30px' }) {
-            const area = document.getElementById(areaId);
-            const base = document.getElementById(baseId);
-            if (!area || !base) return;
-
-            const stick = base.querySelector(stickSelector);
-            const canvasWrapper = document.getElementById('canvas-wrapper');
-
-            let touchId = null, originX = 0, originY = 0;
-            let stickRadius = 35; // Default
-
-            function setDefaultPosition() {
-                if (visibleIdle && isMobileMode) {
-                    base.style.display = 'flex';
-                    base.style.left = defaultPos.left || 'auto';
-                    base.style.top = defaultPos.top || 'auto';
-                    base.style.bottom = defaultPos.bottom || 'auto';
-                    base.style.right = defaultPos.right || 'auto';
-                } else {
-                    base.style.display = 'none';
-                }
-            }
-            setDefaultPosition();
-
-            const moveHandler = (e) => {
-                if (touchId === null) return;
-                e.preventDefault();
-                let touch = null;
-                for (let i = 0; i < e.changedTouches.length; i++) {
-                    if (e.changedTouches[i].identifier === touchId) { touch = e.changedTouches[i]; break; }
-                }
-                if (touch) handleMove(touch.clientX, touch.clientY);
-            };
-
-            const endHandler = (e) => {
-                let touchFound = false;
-                for (let i = 0; i < e.changedTouches.length; i++) {
-                    if (e.changedTouches[i].identifier === touchId) { touchFound = true; break; }
-                }
-                if (touchFound) {
-                    touchId = null; resetStick(); setDefaultPosition();
-                    window.removeEventListener('touchmove', moveHandler);
-                    window.removeEventListener('touchend', endHandler);
-                    window.removeEventListener('touchcancel', endHandler);
-                }
-            };
-
-            area.addEventListener('touchstart', (e) => {
-                if (touchId !== null) return;
-                e.preventDefault();
-                const touch = e.changedTouches[0];
-                touchId = touch.identifier;
-
-                const wrapperRect = canvasWrapper.getBoundingClientRect();
-                let baseX = touch.clientX - wrapperRect.left - base.offsetWidth / 2;
-                let baseY = touch.clientY - wrapperRect.top - base.offsetHeight / 2;
-                baseX = Math.max(0, Math.min(wrapperRect.width - base.offsetWidth, baseX));
-                baseY = Math.max(0, Math.min(wrapperRect.height - base.offsetHeight, baseY));
-
-                base.style.left = baseX + 'px';
-                base.style.top = baseY + 'px';
-                base.style.display = 'flex';
-
-                originX = touch.clientX; originY = touch.clientY;
-                stickRadius = base.offsetWidth / 2 - stick.offsetWidth / 2;
-                if (isNaN(stickRadius) || stickRadius <= 0) stickRadius = 35;
-
-                handleMove(touch.clientX, touch.clientY);
-
-                window.addEventListener('touchmove', moveHandler, { passive: false });
-                window.addEventListener('touchend', endHandler, { passive: false });
-                window.addEventListener('touchcancel', endHandler, { passive: false });
-
-            }, { passive: false });
-
-            function handleMove(clientX, clientY) {
-                let dx = clientX - originX;
-                let dy = clientY - originY;
-                if (invertY) dy = -dy;
-
-                const dist = Math.min(Math.hypot(dx, dy), stickRadius);
-                const angle = Math.atan2(dy, dx);
-
-                const moveX = Math.cos(angle) * dist;
-                const moveY = Math.sin(angle) * dist;
-
-                stick.style.transform = `translate(${moveX}px, ${invertY ? -moveY : moveY}px)`;
-                joystickInputs[playerId] = { active: true, angle: angle };
-            }
-
-            function resetStick() {
-                stick.style.transform = `translate(0px, 0px)`;
-                joystickInputs[playerId] = { active: false, angle: 0 };
-            }
-        }
-
-        function setupButton(btnId, keyName) {
-            const btn = document.getElementById(btnId);
-            if (!btn) return;
-
-            let touchId = null;
-            const press = (e) => {
-                e.preventDefault();
-                if (touchId === null) {
-                    touchId = e.changedTouches[0].identifier;
-                    keys[keyName] = true;
-                }
-            };
-            const release = (e) => {
-                e.preventDefault();
-                for (let i = 0; i < e.changedTouches.length; i++) {
-                    if (e.changedTouches[i].identifier === touchId) {
-                        touchId = null;
-                        keys[keyName] = false;
-                        break;
-                    }
-                }
-            };
-            btn.addEventListener('touchstart', press, { passive: false });
-            btn.addEventListener('touchend', release);
-            btn.addEventListener('touchcancel', release);
-        }
-
-        window.addEventListener('keydown', (e) => {
-            if (e.target.tagName === 'INPUT') return;
-            keys[e.code] = true;
-            if (gameState === 'playing' && e.code === 'KeyP') {
-                pauseGame();
             }
         });
-        window.addEventListener('keyup', (e) => {
-            if (e.target.tagName === 'INPUT') return;
-            keys[e.code] = false;
-        });
+        
+        // --- UPDATED: Car-Car Collision (More Realistic) ---
+        for(let i=0; i<cars.length; i++) {
+            for(let j=i+1; j<cars.length; j++) {
+                const c1 = cars[i], c2 = cars[j];
+                const d = Math.hypot(c1.x-c2.x, c1.y-c2.y);
+                const min_dist = 40; // Combined approx radius
+                if(d < min_dist) {
+                    const a = Math.atan2(c1.y-c2.y, c1.x-c2.x);
+                    const push = (min_dist-d) / 2; // How much to push apart
+                    
+                    // Normal vector
+                    const nx = (c2.x - c1.x) / d;
+                    const ny = (c2.y - c1.y) / d;
 
-    </script>
+                    // Relative velocity
+                    const rvx = c2.velX - c1.velX;
+                    const rvy = c2.velY - c1.velY;
+                    
+                    // Velocity along the normal
+                    const velAlongNormal = rvx * nx + rvy * ny;
+                    
+                    // Don't resolve if velocities are separating
+                    if (velAlongNormal > 0) {
+                        // Still apply positional correction
+                        if(c1.isLocal || (window.netState.isHost && c1.isAI)) { c1.x -= nx*push; c1.y -= ny*push; }
+                        if(c2.isLocal || (window.netState.isHost && c2.isAI)) { c2.x += nx*push; c2.y += ny*push; }
+                        continue; // Skip velocity change
+                    }
+                    
+                    // Calculate impulse (simplified, no mass)
+                    const restitution = 0.4; // Bounciness
+                    let impulse = -(1 + restitution) * velAlongNormal;
+                    impulse /= 2; // Since mass is equal (1) for both, divide by (1/m1 + 1/m2) = 2
+                    
+                    // Apply impulse
+                    const impulseX = impulse * nx;
+                    const impulseY = impulse * ny;
+                    
+                    if(c1.isLocal || (window.netState.isHost && c1.isAI)) {
+                        c1.x -= nx*push; c1.y -= ny*push;
+                        c1.velX -= impulseX; c1.velY -= impulseY;
+                    }
+                    if(c2.isLocal || (window.netState.isHost && c2.isAI)) {
+                        c2.x += nx*push; c2.y += ny*push;
+                        c2.velX += impulseX; c2.velY += impulseY;
+                    }
+                }
+            }
+        }
+        // --- END UPDATED COLLISION ---
+        
+        ball.draw();
+        if (localCar) document.getElementById('boost-fill').style.width = localCar.boost + '%';
+
+        // SYNC
+        if (window.netState.isHost) {
+             const nowMs = Date.now();
+             if (nowMs - window.netState.lastUpdateSent > 30) {
+                 window.netState.lastUpdateSent = nowMs;
+                 const payload = {
+                     scores: score, timer: gameTimer, paused: isPaused,
+                     padStates: boostPads.map(p => p.cooldown)
+                 };
+                 const entities = {};
+                 cars.forEach(c => { if(c.isLocal || c.isAI) entities[c.id] = { x:Math.round(c.x), y:Math.round(c.y), angle:Math.round(c.angle), boost:Math.round(c.boost), boosting:c.boosting }; });
+                 entities['ball'] = { x:Math.round(ball.x), y:Math.round(ball.y), velX:ball.velX, velY:ball.velY, val:ball.val };
+                 broadcastToClients('ENTITY_UPDATE', entities);
+                 broadcastToClients('GAME_UPDATE', payload);
+             }
+             
+             // Host Goal Check
+             const scoringTeam = checkGoal(ball, canvas);
+             if (scoringTeam) {
+                 if(scoringTeam === 'left') score.left += ball.val; else score.right += ball.val;
+                 
+                 // Attribute Goal to Closest Friendly Player
+                 const teamPlayers = cars.filter(c => c.team === scoringTeam);
+                 let closest = null, minD = Infinity;
+                 teamPlayers.forEach(c => {
+                    const d = Math.hypot(c.x - ball.x, c.y - ball.y);
+                    if(d < minD) { minD = d; closest = c; }
+                 });
+                 if(closest) {
+                    const p = window.netState.players.find(pl => pl.userId === closest.ownerId);
+                    if(p) p.stats.goals = (p.stats.goals||0) + 1;
+                 }
+
+                 ball.x = 500; ball.y = 150 + Math.random() * 300; ball.velX = 0; ball.velY = 0;
+                 cars.forEach(c => { if(c.resetPos) { c.x=c.resetPos.x; c.y=c.resetPos.y; c.angle=c.resetPos.angle; c.velX=0; c.velY=0; c.boost=100; }});
+                 window.handleGameStateUpdate({scores: score});
+                 
+                 if (window.hostConfig.type === 'points' && (score.left >= window.hostConfig.scoreTarget || score.right >= window.hostConfig.scoreTarget)) {
+                    let winner = score.left >= window.hostConfig.scoreTarget ? 'left' : 'right';
+                    const p = { winner, scores: score, timer: 0, paused: false, forceSync: true };
+                    window.handleGameStateUpdate(p); broadcastToClients('GAME_UPDATE', p);
+                 }
+             }
+        } else if (localCar && Date.now() - window.netState.lastUpdateSent > 30) {
+             window.netState.lastUpdateSent = Date.now();
+             const p = {}; p[localCar.id] = { x:Math.round(localCar.x), y:Math.round(localCar.y), angle:Math.round(localCar.angle), boost:Math.round(localCar.boost), boosting:localCar.boosting };
+             sendToHost('ENTITY_UPDATE', p);
+        }
+    }
+}
+
+window.addEventListener('keydown', e => keys[e.code] = true);
+window.addEventListener('keyup', e => keys[e.code] = false);
+</script>
 </body>
-
 </html>
