@@ -28,10 +28,10 @@
         // Visual & Control Settings
         window.gameSettings = {
             visuals: 'simple', // Default to Simple
-            rotSpeed: 5.0,     // UPDATED: Faster initial rotation
+            rotSpeed: 6.0,     // INCREASED DEFAULT ROTATION SPEED
             keybinds: {
                 up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', 
-                boost: 'ShiftLeft', boost_alt: 'ShiftRight' // UPDATED: Dual boost keys
+                boost: 'ShiftLeft', boost_alt: 'ShiftRight' // Dual boost keys
             }
         };
 
@@ -124,7 +124,7 @@
                 window.netState.hostConn = conn;
                 window.netState.roomId = hostId;
                 updateStatus("Connected to Host", "text-blue-400");
-                // UPDATED: Send visual setting on join
+                // Send visual setting on join
                 sendToHost('JOIN_REQUEST', { 
                     username: window.netState.user.username, 
                     userId: window.netState.myId,
@@ -153,7 +153,6 @@
             const { type, payload } = packet;
 
             if (type === 'JOIN_REJECT') {
-                // Use a custom message box instead of alert()
                 showCustomAlert("Cannot Join: " + payload.reason);
                 window.switchScreen('screen-start');
                 return;
@@ -163,7 +162,7 @@
             if (type === 'JOIN_REQUEST') {
                 if (!window.netState.isHost) return;
 
-                // NEW: Duplicate Name Check
+                // Duplicate Name Check
                 const normalizedNewName = payload.username.toUpperCase();
                 const nameExists = window.netState.players.some(p => p.username.toUpperCase() === normalizedNewName);
                 
@@ -171,19 +170,17 @@
                     const conn = window.netState.clientConns.find(c => c.peer === senderId);
                     if (conn) {
                         conn.send({ type: 'JOIN_REJECT', payload: { reason: 'Name Already Taken' } });
-                        // Don't close connection, just reject. The client-side alert will handle it.
                     }
                     return; // Stop processing this join request
                 }
-                // END NEW
 
                 const newPlayer = {
                     roomId: window.netState.roomId,
                     userId: payload.userId,
-                    username: normalizedNewName, // Use the uppercase version
+                    username: normalizedNewName,
                     isHost: false, isReady: false, slotIndex: -1, team: 'spectator',
                     stats: { goals: 0, hits: 0, saves: 0 },
-                    visualSetting: payload.visualSetting || 'simple' // UPDATED: Store visual setting
+                    visualSetting: payload.visualSetting || 'simple'
                 };
                 const idx = window.netState.players.findIndex(p => p.userId === payload.userId);
                 if (idx === -1) window.netState.players.push(newPlayer);
@@ -196,9 +193,7 @@
             else if (type === 'LOBBY_STATE') {
                 window.netState.players = payload.players;
                 window.hostConfig = payload.settings;
-                // --- BUG FIX: Was 'updateLOBBY_STATE' ---
                 window.updateLobbyUI(payload.settings);
-                // --- END BUG FIX ---
                 window.renderSlots(payload.players);
                 // Ensure Lobby Code is set (if joining late)
                 document.getElementById('lobby-code').innerText = payload.roomId;
@@ -440,7 +435,6 @@
        
         <div id="login-container" class="flex flex-col items-center w-full transition-opacity duration-500">
             <div class="mb-2 w-full max-w-[400px] text-left text-gray-500 text-xs font-bold ml-2">NAME</div>
-            <!-- UPDATED: Saves name on input and forces uppercase, added try...catch -->
             <input type="text" id="inp-name" class="inp-lg mb-6 shadow-xl" placeholder="ENTER NAME" maxlength="12" oninput="this.value = this.value.toUpperCase(); try { localStorage.setItem('player_name', this.value); } catch(e) { console.warn('Could not save name to localStorage.'); }">
             <div id="name-error" class="h-4 text-red-500 font-bold text-sm mb-2 opacity-0 transition-opacity">Name too short (3+ chars)</div>
            
@@ -475,12 +469,11 @@
                     <h3 class="text-lg font-bold text-yellow-400 mb-2">STEERING SENSITIVITY</h3>
                     <div class="flex items-center gap-4">
                         <span class="text-gray-400 text-sm font-bold">SLOW</span>
-                        <!-- UPDATED: Range max increased to 8.0 -->
-                        <input type="range" min="1.5" max="8.0" step="0.1" id="inp-rot-speed" class="w-full accent-yellow-400 h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer" oninput="updateRotSpeed(this.value)">
+                        <!-- UPDATED RANGE MIN 2.0 MAX 10.0 -->
+                        <input type="range" min="2.0" max="10.0" step="0.1" id="inp-rot-speed" class="w-full accent-yellow-400 h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer" oninput="updateRotSpeed(this.value)">
                         <span class="text-gray-400 text-sm font-bold">FAST</span>
                     </div>
-                    <!-- UPDATED: Default value text changed to 5.0 -->
-                    <div class="text-center text-white font-mono mt-2" id="val-rot-speed">5.0</div>
+                    <div class="text-center text-white font-mono mt-2" id="val-rot-speed">6.0</div>
                 </div>
 
                 <!-- TEST AREA -->
@@ -724,14 +717,12 @@ window.onload = () => {
     canvas.height = FIELD_CONSTANTS.CANVAS_HEIGHT;
     testCanvas.width = 300; testCanvas.height = 200;
 
-    // --- UPDATED: Added try...catch for localStorage ---
     try {
         // Load persisted data
         const savedName = localStorage.getItem('player_name');
         if (savedName) {
-            // UPDATED: Force uppercase on load
             document.getElementById('inp-name').value = savedName.toUpperCase();
-            window.netState.user.username = savedName.toUpperCase(); // UPDATED: Set username on load
+            window.netState.user.username = savedName.toUpperCase();
         }
         
         // Load Settings
@@ -741,7 +732,6 @@ window.onload = () => {
         console.warn("LocalStorage is disabled or unavailable. Settings will not be saved.", e);
         showCustomAlert("Could not load saved data. Your browser may be blocking site data or you may be in private mode. Settings will not be saved.", "Storage Error");
     }
-    // --- END UPDATED ---
     
     updateSettingsUI();
     renderKeybinds();
@@ -764,15 +754,13 @@ function updateRotSpeed(val) {
 }
 
 function saveSettings() {
-    // --- UPDATED: Added try...catch ---
     try {
         localStorage.setItem('car_settings', JSON.stringify(window.gameSettings));
     } catch(e) { 
         console.warn('Could not save settings to localStorage.'); 
     }
-    // --- END UPDATED ---
     
-    // UPDATED: Update visual setting in our local player object
+    // Update visual setting in our local player object
     const me = window.netState.players.find(p => p.userId === window.netState.myId);
     if (me) {
         me.visualSetting = window.gameSettings.visuals;
@@ -780,10 +768,9 @@ function saveSettings() {
 }
 
 function resetSettings() {
-    // UPDATED: New defaults for rotSpeed and keybinds
     window.gameSettings = {
         visuals: 'simple',
-        rotSpeed: 5.0,
+        rotSpeed: 6.0,
         keybinds: { 
             up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', 
             boost: 'ShiftLeft', boost_alt: 'ShiftRight' 
@@ -817,11 +804,9 @@ function renderKeybinds() {
     list.innerHTML = '';
     const map = { 
         'up':'ACCELERATE', 'down':'REVERSE', 'left':'TURN LEFT', 'right':'TURN RIGHT'
-        // Note: Boost is handled separately
     };
     
     Object.keys(window.gameSettings.keybinds).forEach(action => {
-        // --- UPDATED: Special handling for boost buttons ---
         if (action === 'boost') {
             const row = document.createElement('div');
             row.className = 'flex justify-between items-center bg-gray-700 p-3 rounded';
@@ -884,6 +869,65 @@ function startRebind(btn, action) {
     window.addEventListener('keydown', handler);
 }
 
+// --- HELPER FOR COOL CAR DRAWING ---
+function drawCoolCar(ctx, w, h, color, boost) {
+    const halfW = w/2;
+    const halfH = h/2;
+
+    // 1. Wheels (Black Rectangles)
+    ctx.fillStyle = 'black';
+    const wheelW = 8;
+    const wheelH = 4;
+    const wheelOffsetX = 12; // Distance from center
+    const wheelOffsetY = halfH; // Stick out from side
+    
+    // Back Left
+    ctx.fillRect(-wheelOffsetX - wheelW/2, -wheelOffsetY - wheelH, wheelW, wheelH);
+    // Front Left (actually Front Right in screen space if facing right) -> Front Top
+    ctx.fillRect(wheelOffsetX - wheelW/2, -wheelOffsetY - wheelH, wheelW, wheelH);
+    // Back Right -> Back Bottom
+    ctx.fillRect(-wheelOffsetX - wheelW/2, wheelOffsetY, wheelW, wheelH);
+    // Front Right -> Front Bottom
+    ctx.fillRect(wheelOffsetX - wheelW/2, wheelOffsetY, wheelW, wheelH);
+
+    // 2. Main Body
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(-halfW, -halfH, w, h, 4); 
+    ctx.fill();
+
+    // 3. Rear Spoiler/Bumper Segment (Reflects the 'capped' look in image)
+    // Darker overlay on the rear 20%
+    ctx.fillStyle = 'rgba(0,0,0,0.2)'; 
+    ctx.beginPath();
+    ctx.roundRect(-halfW, -halfH, 8, h, [4, 0, 0, 4]); 
+    ctx.fill();
+
+    // 4. Stripe
+    // Lighter strip down the center, starting AFTER the bumper
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.fillRect(-halfW + 8, -3, w - 10, 6); 
+
+    // 5. Cabin
+    // Large dark gray rounded rect in center
+    ctx.fillStyle = '#1f2937'; 
+    ctx.beginPath();
+    ctx.roundRect(-8, -9, 16, 18, 3);
+    ctx.fill();
+
+    // 6. Boost Effect
+    if(boost){
+        ctx.fillStyle="#00ffff"; 
+        ctx.globalCompositeOperation = 'screen';
+        ctx.beginPath(); 
+        ctx.moveTo(-halfW, -4); 
+        ctx.lineTo(-halfW-15, 0); 
+        ctx.lineTo(-halfW, 4); 
+        ctx.fill();
+        ctx.globalCompositeOperation = 'source-over';
+    }
+}
+
 // Test Drive Loop
 function testLoop() {
     if (document.getElementById('screen-settings').classList.contains('active')) {
@@ -899,60 +943,18 @@ function testLoop() {
         testCtx.translate(150, 100);
         testCtx.rotate(-testCar.angle * Math.PI / 180);
         
-        // Draw Car (Test Area)
         const w = 40, h = 22;
         const color = '#3b82f6';
         
-        // --- DRAWING LOGIC (COPIED FROM CAR CLASS FOR CONSISTENCY) ---
         if (window.gameSettings.visuals === 'cool') {
-            // --- UPDATED COOL VISUAL V2 ---
-            const wheelW = 6, wheelH = 10;
-            const wheelOffset = 4;
-            // Draw Wheels (Black)
-            testCtx.fillStyle = '#111827';
-            testCtx.fillRect(-w/2 + 5, -h/2 - wheelOffset, wheelW, wheelH); // Front Left
-            testCtx.fillRect(w/2 - 5 - wheelW, -h/2 - wheelOffset, wheelW, wheelH); // Front Right
-            testCtx.fillRect(-w/2 + 5, h/2 - wheelH + wheelOffset, wheelW, wheelH); // Rear Left
-            testCtx.fillRect(w/2 - 5 - wheelW, h/2 - wheelH + wheelOffset, wheelW, wheelH); // Rear Right
-
-            // Main Body (Team Color)
-            testCtx.fillStyle = color;
-            testCtx.beginPath(); testCtx.roundRect(-w/2,-h/2, w, h, 4); testCtx.fill();
-
-            // Racing Stripes (Dual White)
-            testCtx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-            testCtx.fillRect(-w/2, -h/2 + 5, w, 4); // Stripe 1
-            testCtx.fillRect(-w/2, h/2 - 9, w, 4); // Stripe 2
-            
-            // New Windshield (Angled)
-            testCtx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-            testCtx.beginPath();
-            testCtx.moveTo(w/2 - 17, -h/2 + 3); // Top-left corner (relative to car center)
-            testCtx.lineTo(w/2 - 7, -h/2 + 3); // Top-right
-            testCtx.lineTo(w/2 - 10, h/2 - 3); // Bottom-right
-            testCtx.lineTo(w/2 - 20, h/2 - 3); // Bottom-left
-            testCtx.closePath(); testCtx.fill();
-            
-            // Headlights
-            testCtx.fillStyle = '#FFFF99'; // Pale Yellow
-            testCtx.fillRect(w/2 - 6, -h/2 + 4, 6, 5); // Right Headlight
-            testCtx.fillRect(w/2 - 6, h/2 - 9, 6, 5); // Left Headlight
-        
-            // Taillights
-            testCtx.fillStyle = '#FF0000'; // Red
-            testCtx.fillRect(-w/2, -h/2 + 5, 3, 4);
-            testCtx.fillRect(-w/2, h/2 - 9, 3, 4);
-            // --- END UPDATED COOL VISUAL V2 ---
-
+            drawCoolCar(testCtx, w, h, color, false);
         } else {
             // Simple Style
             testCtx.fillStyle = color;
             testCtx.beginPath(); testCtx.roundRect(-w/2,-h/2, w, h, 4); testCtx.fill();
-            // Brighter Yellow Windscreen (Moved forward)
-            testCtx.fillStyle = '#ffff00'; // Brighter Yellow
+            testCtx.fillStyle = '#ffff00';
             testCtx.beginPath(); testCtx.roundRect(8, -h/2+3, 8, h-6, 2); testCtx.fill();
         }
-        // -------------------------------------------------------------
 
         testCtx.restore();
     }
@@ -971,13 +973,11 @@ function validateName() {
     const err = document.getElementById('name-error');
     if(n.length < 3) { err.style.opacity = '1'; return null; }
     err.style.opacity = '0';
-    // --- UPDATED: Added try...catch ---
     try {
         localStorage.setItem('player_name', n);
     } catch(e) { 
         console.warn('Could not save name to localStorage.'); 
     }
-    // --- END UPDATED ---
     return n;
 }
 function goToModeSelect() {
@@ -1031,7 +1031,6 @@ window.finalizeCreateRoom = async () => {
         window.netState.roomId = roomId;
         window.hostConfig.hostId = roomId;
        
-        // UPDATED: Store host's visual setting and uppercase name
         window.netState.players = [{
             roomId: roomId, userId: window.netState.myId, username: window.netState.user.username.toUpperCase(),
             isHost: true, isReady: false, slotIndex: -1, team: 'spectator', 
@@ -1151,21 +1150,24 @@ window.startGame = () => {
     if (!window.netState.isHost) return;
     window.netState.players.forEach(p => { p.stats = { goals: 0, hits: 0, saves: 0 }; });
     
-    // --- UPDATED: Add AI players to the list ---
+    // --- UPDATED: Add AI players with better naming ---
     const mode = window.hostConfig.mode || '1v1';
     const count = mode === '2v2' ? 4 : (mode === '3v3' ? 6 : 2);
+    let botCounter = 0; // Counter for bot naming
+
     for (let i = 0; i < count; i++) {
         const p = window.netState.players.find(pl => pl.slotIndex === i);
         if (!p) {
             // This is an AI slot
+            botCounter++;
             const isRed = i % 2 !== 0;
             const aiPlayer = {
                 roomId: window.netState.roomId,
-                userId: `ai_${i}`, // Consistent ID
-                username: `BOT ${i+1}`, // UPDATED: New Name
+                userId: `ai_${i}`, 
+                username: `BOT ${botCounter}`, // UPDATED: Names are now "BOT 1", "BOT 2" sequentially
                 isHost: false, isReady: true, slotIndex: i, 
                 team: isRed ? 'right' : 'left',
-                isAI: true, // Add a flag
+                isAI: true,
                 stats: { goals: 0, hits: 0, saves: 0 }
             };
             window.netState.players.push(aiPlayer);
@@ -1183,7 +1185,7 @@ window.returnToLobby = () => {
     window.hostConfig.status = 'lobby';
     window.resetGameObjects();
     
-    // UPDATED: Remove AI players from the list
+    // Remove AI players from the list
     window.netState.players = window.netState.players.filter(p => !p.isAI);
     
     window.switchScreen('screen-lobby');
@@ -1224,7 +1226,6 @@ window.renderSlots = (players) => {
     if(window.netState.isHost) {
         randBtn.style.display = 'block';
         const readyCount = players.filter(p => p.slotIndex !== -1 && p.isReady).length;
-        const totalHumans = players.filter(p => p.slotIndex !== -1 && !p.isAI).length; // Check humans
         const totalPlayers = players.filter(p => p.slotIndex !== -1).length;
         
         startBtn.style.display = 'block';
@@ -1256,7 +1257,6 @@ window.renderSlots = (players) => {
             div.innerHTML = `<div class="flex items-center gap-3"><div class="text-white font-bold text-lg uppercase">${p.username}</div>${p.isHost ? '<span class="text-xxs bg-yellow-500 text-black px-1 rounded font-bold">HOST</span>' : ''}</div><div class="px-2 py-1 rounded text-xs font-bold ${p.isReady ? 'bg-green-500 text-white' : 'bg-yellow-500/50 text-yellow-100'}">${p.isReady ? 'READY' : 'WAITING'}</div>`;
         } else {
             // This slot is empty (will be AI)
-            // UPDATED: AI Bot Name
             div.className = "slot ai";
             div.innerHTML = `<div class="text-gray-400 font-bold flex items-center gap-2"><span>🤖</span> BOT</div><div class="text-xs text-gray-500 font-bold border border-gray-600 px-2 py-1 rounded hover:bg-gray-700 hover:text-white">JOIN</div>`;
             div.onclick = () => window.claimSlot(i);
@@ -1321,14 +1321,13 @@ class Car {
         this.id = id; this.x = x; this.y = y; this.angle = angle;
         this.team = team; this.isLocal = isLocal; this.isAI = isAI; this.ownerId = ownerId;
         this.velX=0; this.velY=0;
-        // UPDATED: Slower physics
-        this.baseAcceleration = 0.25; 
-        this.baseMaxSpeed = 5.0;
+        // UPDATED PHYSICS: Slower, heavier
+        this.baseAcceleration = 0.2; // Reduced from 0.25
+        this.baseMaxSpeed = 4.5;    // Reduced from 5.0
         this.boostPower = 1.7;
-        this.baseSideFrictionFactor = 0.07; // More "heavy" feel
+        this.baseSideFrictionFactor = 0.08; // Increased side friction slightly
         // END UPDATED
 
-        // UPDATED: AI has faster base rotation
         this.baseRotationSpeed = this.isAI ? 4.5 : 3.0;
         this.boost=100;
         this.width=FIELD_CONSTANTS.CAR_WIDTH; this.height=FIELD_CONSTANTS.CAR_HEIGHT;
@@ -1340,7 +1339,7 @@ class Car {
     update(dt) {
         if (this.isLocal) {
             const kb = window.gameSettings.keybinds;
-            const rotSpeed = window.gameSettings.rotSpeed || 5.0; // Use updated default
+            const rotSpeed = window.gameSettings.rotSpeed || 5.0; 
             
             let throttle = 0;
             if (keys[kb.up]) throttle = 1;
@@ -1349,14 +1348,12 @@ class Car {
             if (keys[kb.left]) this.angle = (this.angle + rotSpeed) % 360;
             if (keys[kb.right]) this.angle = (this.angle - rotSpeed) % 360;
             
-            // UPDATED: Dual BOOST KEY LOGIC
             let isBoostPressed = false;
             const bind1 = kb.boost;
             const bind2 = kb.boost_alt;
 
             const checkBind = (bind) => {
                 if (!bind) return false;
-                // Handle generic "Shift" or "Control"
                 if (bind.includes('Shift')) {
                     return keys['ShiftLeft'] || keys['ShiftRight'];
                 } else if (bind.includes('Control')) {
@@ -1421,12 +1418,10 @@ class Car {
         else {
             const data = remoteEntities[this.id];
             if (data) {
-                // UPDATED: Smoother interpolation
                 this.x += (data.x - this.x) * 0.3; this.y += (data.y - this.y) * 0.3;
                 let d = data.angle - this.angle;
                 while (d < -180) d += 360; while (d > 180) d -= 360;
                 this.angle += d * 0.3;
-                // END UPDATED
                 this.boost = data.boost || 100; this.boosting = data.boosting || false;
             }
         }
@@ -1441,7 +1436,6 @@ class Car {
         let diff = targetAngle - this.angle;
         if (diff > 180) diff -= 360; if (diff < -180) diff += 360;
         
-        // AI uses its own baseRotationSpeed
         if (diff > this.baseRotationSpeed) this.angle = (this.angle + this.baseRotationSpeed) % 360;
         else if (diff < -this.baseRotationSpeed) this.angle = (this.angle - this.baseRotationSpeed) % 360;
         else this.angle = targetAngle;
@@ -1465,67 +1459,19 @@ class Car {
         ctx.rotate(-this.angle * Math.PI / 180);
        
         const w = this.width, h = this.height;
-        
-        // --- UPDATED: VISUALS ARE CLIENT-SIDE ---
-        // Find the local player's setting
         const myUID = window.netState.myId;
         const me = window.netState.players.find(p => p.userId === myUID);
         
-        // Default to simple if 'me' isn't found or use their setting
         const myVisualSetting = (me && me.visualSetting) ? me.visualSetting : window.gameSettings.visuals;
         const isSimple = myVisualSetting === 'simple';
-        // --- END UPDATED ---
 
         if (!isSimple) {
-            // --- UPDATED COOL VISUAL V2 ---
-            const wheelW = 6, wheelH = 10;
-            const wheelOffset = 4;
-            // Draw Wheels (Black)
-            ctx.fillStyle = '#111827';
-            ctx.fillRect(-w/2 + 5, -h/2 - wheelOffset, wheelW, wheelH); // Front Left
-            ctx.fillRect(w/2 - 5 - wheelW, -h/2 - wheelOffset, wheelW, wheelH); // Front Right
-            ctx.fillRect(-w/2 + 5, h/2 - wheelH + wheelOffset, wheelW, wheelH); // Rear Left
-            ctx.fillRect(w/2 - 5 - wheelW, h/2 - wheelH + wheelOffset, wheelW, wheelH); // Rear Right
-
-            // Main Body (Team Color)
-            ctx.fillStyle = this.color;
-            ctx.beginPath(); ctx.roundRect(-w/2,-h/2, w, h, 4); ctx.fill();
-            
-            // Racing Stripes (Dual White)
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
-            ctx.fillRect(-w/2, -h/2 + 5, w, 4); // Stripe 1
-            ctx.fillRect(-w/2, h/2 - 9, w, 4); // Stripe 2
-            
-            // New Windshield (Angled)
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-            ctx.beginPath();
-            ctx.moveTo(w/2 - 17, -h/2 + 3); // Top-left corner (relative to car center)
-            ctx.lineTo(w/2 - 7, -h/2 + 3); // Top-right
-            ctx.lineTo(w/2 - 10, h/2 - 3); // Bottom-right
-            ctx.lineTo(w/2 - 20, h/2 - 3); // Bottom-left
-            ctx.closePath(); ctx.fill();
-            
-            // Headlights
-            ctx.fillStyle = '#FFFF99'; // Pale Yellow
-            ctx.fillRect(w/2 - 6, -h/2 + 4, 6, 5); // Right Headlight
-            ctx.fillRect(w/2 - 6, h/2 - 9, 6, 5); // Left Headlight
-        
-            // Taillights
-            ctx.fillStyle = '#FF0000'; // Red
-            ctx.fillRect(-w/2, -h/2 + 5, 3, 4);
-            ctx.fillRect(-w/2, h/2 - 9, 3, 4);
-
-            if(this.boosting){
-                ctx.fillStyle="#00ffff"; ctx.globalCompositeOperation = 'screen';
-                ctx.beginPath(); ctx.moveTo(-w/2, -5); ctx.lineTo(-w/2-15, 0); ctx.lineTo(-w/2, 5); ctx.fill();
-                ctx.globalCompositeOperation = 'source-over';
-            }
-            // --- END UPDATED COOL VISUAL V2 ---
+            // --- UPDATED COOL VISUAL (Specific Description) ---
+            drawCoolCar(ctx, w, h, this.color, this.boosting);
         } else {
-            // UPDATED: Simple Look (Bright Yellow Windscreen moved forward)
+            // Simple Look
             ctx.fillStyle = this.color;
             ctx.beginPath(); ctx.roundRect(-w/2,-h/2, w, h, 4); ctx.fill();
-            // Bright Yellow Windscreen (Moved to x=8, brighter)
             ctx.fillStyle = '#ffff00';
             ctx.beginPath(); ctx.roundRect(8, -h/2+3, 8, h-6, 2); ctx.fill();
             
@@ -1538,7 +1484,7 @@ class Car {
        
         ctx.restore();
         
-        // Boost Bar (Above Car)
+        // Boost Bar
         const barW = 40, barH = 5;
         ctx.fillStyle = 'rgba(0,0,0,0.5)';
         ctx.fillRect(-barW/2, -35, barW, barH);
@@ -1548,7 +1494,6 @@ class Car {
         // Name
         ctx.fillStyle = 'white'; ctx.font = '10px Inter'; ctx.textAlign = 'center';
         const p = window.netState.players.find(pl => pl.userId === this.ownerId);
-        // UPDATED: Show player/AI name
         ctx.fillText(p ? p.username : 'Player', 0, -42);
         
         ctx.restore();
@@ -1563,8 +1508,17 @@ class Ball {
     update(dt) {
         if (window.netState.isHost) {
             this.x += this.velX*dt*60; this.y += this.velY*dt*60;
-            // UPDATED: Slower physics (more friction)
             this.velX *= 0.975; this.velY *= 0.975;
+            
+            // --- UPDATED: Velocity Cap to prevent tunneling ---
+            const speed = Math.hypot(this.velX, this.velY);
+            const maxBallSpeed = 12.0; // Hard cap
+            if(speed > maxBallSpeed) {
+                const scale = maxBallSpeed / speed;
+                this.velX *= scale; this.velY *= scale;
+            }
+            // --- END UPDATED ---
+
             const goalHeight = FIELD_CONSTANTS.GOAL_HEIGHT;
             const goalTop = canvas.height / 2 - goalHeight / 2;
             const goalBottom = canvas.height / 2 + goalHeight / 2;
@@ -1599,7 +1553,6 @@ window.initGame = (roomData) => {
     cars = []; boostPads = []; score = {left:0, right:0};
     document.getElementById('score-left').innerText = '0'; document.getElementById('score-right').innerText = '0';
     
-    // Timer Visibility Logic
     const timerBox = document.getElementById('game-timer');
     if (roomData.type === 'points') {
         timerBox.classList.add('hidden-mode');
@@ -1608,34 +1561,31 @@ window.initGame = (roomData) => {
         gameTimer = roomData.duration || 120;
     }
     
-    // NEW PAD LOCATIONS (1 Center, 4 Mid-Corners, 4 Inner)
     const W = FIELD_CONSTANTS.CANVAS_WIDTH, H = FIELD_CONSTANTS.CANVAS_HEIGHT;
     const locs = [
-        {x:W/2, y:H/2}, // Center
-        {x:150, y:150}, {x:W-150, y:150}, {x:150, y:H-150}, {x:W-150, y:H-150}, // Corners
-        {x:W/2-100, y:H/2}, {x:W/2+100, y:H/2}, {x:W/2, y:H/2-100}, {x:W/2, y:H/2+100} // Inner Cross
+        {x:W/2, y:H/2},
+        {x:150, y:150}, {x:W-150, y:150}, {x:150, y:H-150}, {x:W-150, y:H-150},
+        {x:W/2-100, y:H/2}, {x:W/2+100, y:H/2}, {x:W/2, y:H/2-100}, {x:W/2, y:H/2+100}
     ];
     locs.forEach(p => boostPads.push(new BoostPad(p.x, p.y)));
 
     const count = roomData.mode === '2v2' ? 4 : (roomData.mode === '3v3' ? 6 : 2);
-    // Use the (now populated) players list
     const players = window.netState.players;
 
     for (let i = 0; i < count; i++) {
         const p = players.find(pl => pl.slotIndex === i);
-        // This 'p' can now be a human or an AI player object
         const isRed = i % 2 !== 0;
         const startX = isRed ? W-100 : 100;
         const startY = H/2 + (Math.floor(i/2) * 80 * (i%4==0?1:-1)) - (count>2?40:0);
         const angle = isRed ? 180 : 0;
         
-        let id = p ? p.userId : `orphaned_car_${i}`; // Should always find a 'p' now
+        let id = p ? p.userId : `orphaned_car_${i}`;
         const newCar = new Car(
             id, startX, startY, angle, 
             isRed ? 'right' : 'left', 
-            p && p.userId === window.netState.myId, // isLocal
-            p && p.isAI, // isAI
-            id // ownerId
+            p && p.userId === window.netState.myId,
+            p && p.isAI,
+            id
         );
         newCar.resetPos = {x: startX, y: startY, angle: angle};
         cars.push(newCar);
@@ -1678,9 +1628,7 @@ window.handleGameStateUpdate = (data) => {
         finalPlayers.sort((a, b) => (b.stats?.goals||0) - (a.stats?.goals||0));
 
         finalPlayers.forEach((p, index) => {
-            // UPDATED: Simpler check, only show players who were in a slot
             if (p.slotIndex === -1) return;
-            
             const row = document.createElement('div');
             row.className = 'scoreboard-row hover:bg-white/5';
             row.innerHTML = `<div class="flex items-center font-bold text-white"><span>${p.username}</span>${index===0?'<span class="mvp-tag">MVP</span>':''}</div>
@@ -1735,16 +1683,16 @@ function loop() {
         
         cars.forEach(c => {
             c.update(dt); c.draw();
-            // Collision physics
             if (c.isLocal || (window.netState.isHost && c.isAI)) {
                 const dx = ball.x - c.x, dy = ball.y - c.y, dist = Math.hypot(dx, dy);
                 if (dist < FIELD_CONSTANTS.BALL_RADIUS + c.width/2) {
                     const angle = Math.atan2(dy, dx), overlap = (FIELD_CONSTANTS.BALL_RADIUS + c.width/2) - dist;
                     c.x -= Math.cos(angle) * overlap; c.y -= Math.sin(angle) * overlap;
-                    // UPDATED: Softer hit
+                    
+                    // UPDATED: Softer hit force (reduced from 12 to 9)
+                    const hitForce = 9.0;
                     c.velX -= Math.cos(angle) * 4; c.velY -= Math.sin(angle) * 4;
                     
-                    // Save Detection Logic
                     let isSave = false;
                     const dangerDist = 250;
                     if (c.team === 'left') {
@@ -1753,8 +1701,7 @@ function loop() {
                         if (ball.x > FIELD_CONSTANTS.CANVAS_WIDTH - dangerDist && ball.velX > 0 && Math.cos(angle) < 0) isSave = true;
                     }
                     
-                    // UPDATED: Softer hit
-                    ball.velX += Math.cos(angle) * 12; ball.velY += Math.sin(angle) * 12;
+                    ball.velX += Math.cos(angle) * hitForce; ball.velY += Math.sin(angle) * hitForce;
                     
                     if (!window.netState.isHost && c.isLocal) {
                         sendToHost('BALL_HIT', { x: ball.x, y: ball.y, velX: ball.velX, velY: ball.velY, isSave });
@@ -1769,41 +1716,30 @@ function loop() {
             }
         });
         
-        // --- UPDATED: Car-Car Collision (More Realistic) ---
         for(let i=0; i<cars.length; i++) {
             for(let j=i+1; j<cars.length; j++) {
                 const c1 = cars[i], c2 = cars[j];
                 const d = Math.hypot(c1.x-c2.x, c1.y-c2.y);
-                const min_dist = 40; // Combined approx radius
+                const min_dist = 40; 
                 if(d < min_dist) {
                     const a = Math.atan2(c1.y-c2.y, c1.x-c2.x);
-                    const push = (min_dist-d) / 2; // How much to push apart
-                    
-                    // Normal vector
+                    const push = (min_dist-d) / 2;
                     const nx = (c2.x - c1.x) / d;
                     const ny = (c2.y - c1.y) / d;
-
-                    // Relative velocity
                     const rvx = c2.velX - c1.velX;
                     const rvy = c2.velY - c1.velY;
-                    
-                    // Velocity along the normal
                     const velAlongNormal = rvx * nx + rvy * ny;
                     
-                    // Don't resolve if velocities are separating
                     if (velAlongNormal > 0) {
-                        // Still apply positional correction
                         if(c1.isLocal || (window.netState.isHost && c1.isAI)) { c1.x -= nx*push; c1.y -= ny*push; }
                         if(c2.isLocal || (window.netState.isHost && c2.isAI)) { c2.x += nx*push; c2.y += ny*push; }
-                        continue; // Skip velocity change
+                        continue;
                     }
                     
-                    // Calculate impulse (simplified, no mass)
-                    const restitution = 0.4; // Bounciness
+                    const restitution = 0.4;
                     let impulse = -(1 + restitution) * velAlongNormal;
-                    impulse /= 2; // Since mass is equal (1) for both, divide by (1/m1 + 1/m2) = 2
+                    impulse /= 2;
                     
-                    // Apply impulse
                     const impulseX = impulse * nx;
                     const impulseY = impulse * ny;
                     
@@ -1818,12 +1754,10 @@ function loop() {
                 }
             }
         }
-        // --- END UPDATED COLLISION ---
         
         ball.draw();
         if (localCar) document.getElementById('boost-fill').style.width = localCar.boost + '%';
 
-        // SYNC
         if (window.netState.isHost) {
              const nowMs = Date.now();
              if (nowMs - window.netState.lastUpdateSent > 30) {
@@ -1839,12 +1773,10 @@ function loop() {
                  broadcastToClients('GAME_UPDATE', payload);
              }
              
-             // Host Goal Check
              const scoringTeam = checkGoal(ball, canvas);
              if (scoringTeam) {
                  if(scoringTeam === 'left') score.left += ball.val; else score.right += ball.val;
                  
-                 // Attribute Goal to Closest Friendly Player
                  const teamPlayers = cars.filter(c => c.team === scoringTeam);
                  let closest = null, minD = Infinity;
                  teamPlayers.forEach(c => {
