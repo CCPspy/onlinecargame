@@ -28,7 +28,7 @@
         // Visual & Control Settings
         window.gameSettings = {
             visuals: 'simple', // Default to Simple
-            rotSpeed: 6.0,     // INCREASED DEFAULT ROTATION SPEED
+            rotSpeed: 4.5,     // UPDATED DEFAULT (Was 5.2)
             keybinds: {
                 up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', 
                 boost: 'ShiftLeft', boost_alt: 'ShiftRight' // Dual boost keys
@@ -405,6 +405,40 @@
             text-align: center;
             box-shadow: 0 10px 25px rgba(0,0,0,0.5);
         }
+
+        /* Custom Slider Thumb Styling */
+        input[type=range].custom-range::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: #fbbf24;
+            cursor: pointer;
+            border: 3px solid #1f2937;
+            box-shadow: 0 0 10px rgba(251, 191, 36, 0.5);
+            margin-top: -10px; /* Aligns thumb with track in some browsers */
+        }
+        input[type=range].custom-range::-moz-range-thumb {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            background: #fbbf24;
+            cursor: pointer;
+            border: 3px solid #1f2937;
+            box-shadow: 0 0 10px rgba(251, 191, 36, 0.5);
+        }
+        /* Make track slightly thicker too */
+        input[type=range].custom-range::-webkit-slider-runnable-track {
+            height: 10px;
+            background: #4b5563;
+            border-radius: 5px;
+        }
+        input[type=range].custom-range::-moz-range-track {
+            height: 10px;
+            background: #4b5563;
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
@@ -450,14 +484,16 @@
         </div>
     </div>
 
-    <!-- SCREEN: SETTINGS -->
+    <!-- SCREEN: SETTINGS (UPDATED LAYOUT) -->
     <div id="screen-settings" class="screen text-center">
-        <div class="flex flex-row gap-8 w-full max-w-5xl h-[80%] items-start">
-            <!-- Left Col: Visuals & Rotation -->
-            <div class="flex-1 flex flex-col gap-6">
-                <h2 class="text-4xl font-black italic text-white text-left">SETTINGS</h2>
+        <!-- Flex container: Left is now thinner (40%), Right takes remaining space -->
+        <div class="flex flex-row gap-6 w-full max-w-5xl h-full max-h-[85vh] p-6 items-stretch">
+            
+            <!-- Left Col: Visuals & Rotation (Thinner: w-[40%]) -->
+            <div class="w-[40%] flex flex-col gap-4">
+                <h2 class="text-4xl font-black italic text-white text-left shrink-0">SETTINGS</h2>
                 
-                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 w-full text-left">
+                <div class="bg-gray-800 p-5 rounded-xl border border-gray-700 w-full text-left shrink-0">
                     <h3 class="text-lg font-bold text-yellow-400 mb-4">CAR VISUALS</h3>
                     <div class="flex gap-4">
                         <button id="btn-vis-simple" class="btn flex-1 bg-gray-600" onclick="setVisuals('simple')">SIMPLE</button>
@@ -465,31 +501,38 @@
                     </div>
                 </div>
 
-                <div class="bg-gray-800 p-6 rounded-xl border border-gray-700 w-full text-left">
+                <div class="bg-gray-800 p-5 rounded-xl border border-gray-700 w-full text-left shrink-0">
                     <h3 class="text-lg font-bold text-yellow-400 mb-2">STEERING SENSITIVITY</h3>
                     <div class="flex items-center gap-4">
                         <span class="text-gray-400 text-sm font-bold">SLOW</span>
-                        <!-- UPDATED RANGE MIN 2.0 MAX 10.0 -->
-                        <input type="range" min="2.0" max="10.0" step="0.1" id="inp-rot-speed" class="w-full accent-yellow-400 h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer" oninput="updateRotSpeed(this.value)">
+                        <!-- UPDATED RANGE: 1.5 - 8.0 to center 4.5 better. Added class 'custom-range' for big thumb -->
+                        <input type="range" min="1.5" max="8.0" step="0.1" id="inp-rot-speed" class="custom-range w-full appearance-none cursor-pointer bg-transparent" oninput="updateRotSpeed(this.value)">
                         <span class="text-gray-400 text-sm font-bold">FAST</span>
                     </div>
-                    <div class="text-center text-white font-mono mt-2" id="val-rot-speed">6.0</div>
+                    <div class="text-center text-white font-mono mt-2" id="val-rot-speed">4.5</div>
                 </div>
 
-                <!-- TEST AREA -->
-                <div class="bg-gray-800 p-4 rounded-xl border border-gray-700 w-full flex-1 flex flex-col">
-                    <h3 class="text-xs font-bold text-gray-500 mb-2">TEST DRIVE (A / D)</h3>
-                    <canvas id="test-canvas" class="w-full flex-1 bg-gray-900 rounded border border-gray-700"></canvas>
+                <!-- TEST AREA: Constrained Aspect Ratio to prevent distortion -->
+                <div class="bg-gray-800 p-4 rounded-xl border border-gray-700 w-full flex-1 flex flex-col min-h-0 justify-center">
+                    <h3 class="text-xs font-bold text-gray-500 mb-2 shrink-0">TEST DRIVE (A / D)</h3>
+                    <!-- Wrapper ensures 3:2 ratio matching canvas internal size 300x200 -->
+                    <div class="w-full aspect-[3/2] relative bg-gray-900 rounded border border-gray-700 self-center">
+                        <canvas id="test-canvas" class="w-full h-full"></canvas>
+                    </div>
                 </div>
             </div>
 
-            <!-- Right Col: Keybinds -->
-            <div class="flex-1 bg-gray-800 p-6 rounded-xl border border-gray-700 h-full overflow-y-auto">
-                <h3 class="text-lg font-bold text-yellow-400 mb-6">CONTROLS</h3>
-                <div class="flex flex-col gap-4" id="keybind-list">
+            <!-- Right Col: Keybinds (Flexible width) -->
+            <div class="flex-1 bg-gray-800 p-6 rounded-xl border border-gray-700 h-full flex flex-col">
+                <h3 class="text-lg font-bold text-yellow-400 mb-4 shrink-0">CONTROLS</h3>
+                
+                <!-- List scrolls here -->
+                <div class="flex flex-col gap-3 overflow-y-auto flex-1 pr-2" id="keybind-list">
                     <!-- Injected via JS -->
                 </div>
-                <div class="mt-8 pt-4 border-t border-gray-700 flex flex-col gap-4">
+                
+                <!-- Buttons fixed at bottom -->
+                <div class="mt-4 pt-4 border-t border-gray-700 flex flex-col gap-3 shrink-0">
                     <button class="btn w-full bg-gray-600 hover:bg-gray-500 text-white" onclick="resetSettings()">RESET TO DEFAULT</button>
                     <button class="btn btn-primary w-full" onclick="switchScreen('screen-start')">SAVE & BACK</button>
                 </div>
@@ -770,7 +813,7 @@ function saveSettings() {
 function resetSettings() {
     window.gameSettings = {
         visuals: 'simple',
-        rotSpeed: 6.0,
+        rotSpeed: 4.5, // UPDATED DEFAULT
         keybinds: { 
             up: 'KeyW', down: 'KeyS', left: 'KeyA', right: 'KeyD', 
             boost: 'ShiftLeft', boost_alt: 'ShiftRight' 
@@ -809,7 +852,7 @@ function renderKeybinds() {
     Object.keys(window.gameSettings.keybinds).forEach(action => {
         if (action === 'boost') {
             const row = document.createElement('div');
-            row.className = 'flex justify-between items-center bg-gray-700 p-3 rounded';
+            row.className = 'flex justify-between items-center bg-gray-700 p-3 rounded shrink-0';
             
             const label = document.createElement('span');
             label.className = 'font-bold text-xs text-gray-300';
@@ -836,7 +879,7 @@ function renderKeybinds() {
 
         } else if (action !== 'boost_alt') { // Skip boost_alt, it's handled above
             const row = document.createElement('div');
-            row.className = 'flex justify-between items-center bg-gray-700 p-3 rounded';
+            row.className = 'flex justify-between items-center bg-gray-700 p-3 rounded shrink-0';
             
             const label = document.createElement('span');
             label.className = 'font-bold text-xs text-gray-300';
